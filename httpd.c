@@ -25,10 +25,66 @@
 #include <pthread.h>
 #include <sys/wait.h>
 #include <stdlib.h>
+#include <fcntl.h>
+
+//printf("%s\n%s\n%s\n%s\n",request->Method,request->URL,request->Path,request->Query);
+//while(1);
+
+
+#define MAXBUFSIZE (4096)
 
 #define ISspace(x) isspace((int)(x))
 
-#define SERVER_STRING "Server: jdbhttpd/0.1.0\r\n"
+#define LOGFILE_DIR "./log.txt"
+#define SERVER_STRING "Server: HttpServer/0.1.0\r\n"
+
+#define MAXERRORLISTNUM 4
+#define RESPONSE_NO_ERROR(STATUS) ((STATUS)!=(-1))
+#define CGI_FILE (1)
+#define ISCGI_FILE(type)  ((type)!=(0))
+
+
+//以下三个结构必须被正确初始化
+const int ErrorMap[MAXERRORLISTNUM]={001,200,404,501};
+
+const char * const ErrorDes[MAXERRORLISTNUM]={	"001", //001
+									"OK",	//200
+									"This web page not found!",//404
+									"501", //501
+									};
+					
+const char * const ErrorFile[MAXERRORLISTNUM]={	"001.html",
+									NULL,
+									"htdocs/404.html",
+									"htdocs/501.html",
+									};
+
+typedef struct
+{
+	char ProtocolVersion[10];
+	int StatusCode;
+	char *Des;
+	char ContentType[100];
+	int ContentLength;
+}RESPONSE_STATIC_MSG;
+
+typedef struct
+{
+	int i;
+}RESPONSE_CGI_MSG;
+
+typedef struct
+{
+	int client;
+	int ParseState;
+	int ErrorCode;
+	char Method[10];
+	char URL[1024];
+	char Path[1024];
+	char *Query;
+	RESPONSE_STATIC_MSG StaticMsg;
+	RESPONSE_CGI_MSG CgiMsg;
+}RESPONSE_MSG;
 
 void accept_request(int);
 void bad_request(int);
@@ -37,95 +93,22 @@ void cannot_execute(int);
 void error_die(const char *);
 void execute_cgi(int, const char *, const char *, const char *);
 int get_line(int, char *, int);
-void headers(int, const char *);
-void not_found(int);
-void serve_file(int, const char *);
-int startup(u_short *);
-void unimplemented(int);
 
-/**********************************************************************/
-/* A request has caused a call to accept() on the server port to
- * return.  Process the request appropriately.
- * Parameters: the socket connected to the client */
-/**********************************************************************/
-void accept_request(int client)
-{
- char buf[1024];
- int numchars;
- char method[255];
- char url[255];
- char path[512];
- size_t i, j;
- struct stat st;
- int cgi = 0;      /* becomes true if server decides this is a CGI
-                    * program */
- char *query_string = NULL;
+int Startup(u_short *);
+void Deal_Request(int client);
+char *Get_ErrorDes(int StatusCode);	//根据错误码返回http响应行描述信息，如果列表找不到返回第一条记录
+char *Get_ErrorFileFd(int StatusCode);//根据错误码返回错误页路径，如果列表找不到返回第一条记录
+int ParseRequest(int client,RESPONSE_MSG *request);
+int CheckRequest(RESPONSE_MSG *request);
+int ResponseClient(RESPONSE_MSG *request);
 
- numchars = get_line(client, buf, sizeof(buf));
- i = 0; j = 0;
- while (!ISspace(buf[j]) && (i < sizeof(method) - 1))
- {
-  method[i] = buf[j];
-  i++; j++;
- }
- method[i] = '\0';
+int Send_ResponseLineToClient(int client,int statusCode,const char *des);
+int Send_ResponseHeadToClient(int client,const char *headName,const char *value);
+int Send_ResponseBlankLineToClient(int client);
+int Send_ResponseBodyToClient(int client,const char *path);
 
- if (strcasecmp(method, "GET") && strcasecmp(method, "POST"))
- {
-  unimplemented(client);
-  return;
- }
+int WriteLogtoFile(int errno,const char *msg);
 
- if (strcasecmp(method, "POST") == 0)
-  cgi = 1;
-
- i = 0;
- while (ISspace(buf[j]) && (j < sizeof(buf)))
-  j++;
- while (!ISspace(buf[j]) && (i < sizeof(url) - 1) && (j < sizeof(buf)))
- {
-  url[i] = buf[j];
-  i++; j++;
- }
- url[i] = '\0';
-
- if (strcasecmp(method, "GET") == 0)
- {
-  query_string = url;
-  while ((*query_string != '?') && (*query_string != '\0'))
-   query_string++;
-  if (*query_string == '?')
-  {
-   cgi = 1;
-   *query_string = '\0';
-   query_string++;
-  }
- }
-
- sprintf(path, "htdocs%s", url);
- if (path[strlen(path) - 1] == '/')
-  strcat(path, "index.html");
- if (stat(path, &st) == -1) {
-  while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
-   numchars = get_line(client, buf, sizeof(buf));
-  not_found(client);
- }
- else
- {
-  if ((st.st_mode & S_IFMT) == S_IFDIR)
-   strcat(path, "/index.html");
-  if ((st.st_mode & S_IXUSR) ||
-      (st.st_mode & S_IXGRP) ||
-      (st.st_mode & S_IXOTH)    )
-   cgi = 1;
-  if (!cgi)
-   serve_file(client, path);
-  else
-   execute_cgi(client, path, method, query_string);
- }
-
- close(client);
-}
 
 /**********************************************************************/
 /* Inform the client that a request it has made has a problem.
@@ -335,81 +318,6 @@ int get_line(int sock, char *buf, int size)
 }
 
 /**********************************************************************/
-/* Return the informational HTTP headers about a file. */
-/* Parameters: the socket to print the headers on
- *             the name of the file */
-/**********************************************************************/
-void headers(int client, const char *filename)
-{
- char buf[1024];
- (void)filename;  /* could use filename to determine file type */
-
- strcpy(buf, "HTTP/1.0 200 OK\r\n");
- send(client, buf, strlen(buf), 0);
- strcpy(buf, SERVER_STRING);
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "Content-Type: text/html\r\n");
- send(client, buf, strlen(buf), 0);
- strcpy(buf, "\r\n");
- send(client, buf, strlen(buf), 0);
-}
-
-/**********************************************************************/
-/* Give a client a 404 not found status message. */
-/**********************************************************************/
-void not_found(int client)
-{
- char buf[1024];
-
- sprintf(buf, "HTTP/1.0 404 NOT FOUND\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, SERVER_STRING);
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "Content-Type: text/html\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "<HTML><TITLE>Not Found</TITLE>\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "<BODY><P>The server could not fulfill\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "your request because the resource specified\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "is unavailable or nonexistent.\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "</BODY></HTML>\r\n");
- send(client, buf, strlen(buf), 0);
-}
-
-/**********************************************************************/
-/* Send a regular file to the client.  Use headers, and report
- * errors to client if they occur.
- * Parameters: a pointer to a file structure produced from the socket
- *              file descriptor
- *             the name of the file to serve */
-/**********************************************************************/
-void serve_file(int client, const char *filename)
-{
- FILE *resource = NULL;
- int numchars = 1;
- char buf[1024];
-
- buf[0] = 'A'; buf[1] = '\0';
- while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
-  numchars = get_line(client, buf, sizeof(buf));
-
- resource = fopen(filename, "r");
- if (resource == NULL)
-  not_found(client);
- else
- {
-  headers(client, filename);
-  cat(client, resource);
- }
- fclose(resource);
-}
-
-/**********************************************************************/
 /* This function starts the process of listening for web connections
  * on a specified port.  If the port is 0, then dynamically allocate a
  * port and modify the original port variable to reflect the actual
@@ -417,7 +325,7 @@ void serve_file(int client, const char *filename)
  * Parameters: pointer to variable containing the port to connect on
  * Returns: the socket */
 /**********************************************************************/
-int startup(u_short *port)
+int Startup(u_short *port)
 {
  int httpd = 0;
  struct sockaddr_in name;
@@ -429,6 +337,12 @@ int startup(u_short *port)
  name.sin_family = AF_INET;
  name.sin_port = htons(*port);
  name.sin_addr.s_addr = htonl(INADDR_ANY);
+int on=1;
+if(setsockopt(httpd,SOL_SOCKET,SO_REUSEADDR,&on,sizeof(on))<0)
+{
+	printf("setsockopt error!\n");	
+	exit(-5);
+}
  if (bind(httpd, (struct sockaddr *)&name, sizeof(name)) < 0)
   error_die("bind");
  if (*port == 0)  /* if dynamically allocating a port */
@@ -444,59 +358,297 @@ int startup(u_short *port)
 }
 
 /**********************************************************************/
-/* Inform the client that the requested web method has not been
- * implemented.
- * Parameter: the client socket */
-/**********************************************************************/
-void unimplemented(int client)
+void Deal_Request(int client)
 {
- char buf[1024];
-
- sprintf(buf, "HTTP/1.0 501 Method Not Implemented\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, SERVER_STRING);
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "Content-Type: text/html\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "<HTML><HEAD><TITLE>Method Not Implemented\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "</TITLE></HEAD>\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "<BODY><P>HTTP request method not supported.\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "</BODY></HTML>\r\n");
- send(client, buf, strlen(buf), 0);
+	RESPONSE_MSG msg_client;
+	memset(&msg_client,0,sizeof(msg_client));
+	ParseRequest(client,&msg_client);
+	CheckRequest(&msg_client);
+	ResponseClient(&msg_client);
+	printf("%s\n%s\n%s\n%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.Query);
+ 	close(msg_client.client);
 }
 
-/**********************************************************************/
+
+
+int ParseRequest(int client,RESPONSE_MSG *request)
+{
+	/*
+	分析请求，解析出来请求方法，路径地址相对于htdocs目录，协议版本
+	文件类型，确定是否为CGI程序
+	*/
+	char buf[MAXBUFSIZE];
+	int numchars;
+	size_t i, j;
+	if(request==NULL)
+	{
+		return -1;
+	}
+	request->client=client;
+	numchars=get_line(request->client,buf,MAXBUFSIZE);
+	i = 0; j = 0;
+	while (!ISspace(buf[j]) && (i < sizeof(request->Method) - 1))
+	{
+		request->Method[i] = buf[j];
+		i++; j++;
+	}
+	request->Method[i] = '\0';
+	
+	if (strcasecmp(request->Method, "GET") && strcasecmp(request->Method, "POST"))
+	{
+		request->ErrorCode=-1;
+		request->StaticMsg.StatusCode=404;//Does not support method
+		return -2;
+	}
+	if (strcasecmp(request->Method, "POST") == 0)
+	{
+		request->ParseState=CGI_FILE;
+	}
+	i = 0;
+	while (ISspace(buf[j]) && (j < sizeof(buf)))
+	{
+		j++;
+	}
+	while (!ISspace(buf[j]) && (i < sizeof(request->URL) - 1) && (j < sizeof(buf)))
+	{
+		request->URL[i] = buf[j];
+		i++; j++;
+	}
+	request->URL[i] = '\0';
+
+
+	if (strcasecmp(request->Method, "GET") == 0)
+	{
+		request->Query= request->URL;
+		while ((*(request->Query) != '?') && (*(request->Query) != '\0'))
+		{
+			(request->Query)++;
+		}
+
+		if (*(request->Query) == '?')
+		{
+			request->ParseState= CGI_FILE;
+			*(request->Query) = '\0';
+			(request->Query)++;
+		}
+	}
+	sprintf(request->Path, "htdocs%s", request->URL);
+	if ((request->Path)[strlen(request->Path) - 1] == '/')
+	{
+		strcat(request->Path, "index.html");
+	}
+
+	while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
+	{
+		numchars = get_line(client, buf, sizeof(buf));
+	}
+
+}
+int CheckRequest(RESPONSE_MSG *request)
+{
+	/*
+	检查文件访问权限，文件长度，如果是静态文件返回文件描述符
+	*/
+
+	struct stat st;
+	if (stat(request->Path, &st) == -1) 
+	{
+		request->ErrorCode=-1;
+		request->StaticMsg.StatusCode=404;//The file is not found
+	}
+	else
+	{
+		if ((st.st_mode & S_IFMT) == S_IFDIR)
+		{
+			strcat(request->Path, "/index.html");
+		}
+		if ((st.st_mode & S_IXUSR) ||(st.st_mode & S_IXGRP) ||(st.st_mode & S_IXOTH))
+		{
+			request->ParseState = CGI_FILE;
+		}
+		
+	}
+}
+
+int ResponseClient(RESPONSE_MSG *request)
+{	
+	if(RESPONSE_NO_ERROR(request->ErrorCode))
+	{
+		if(ISCGI_FILE(request->ParseState))//CGI FILE
+		{
+			execute_cgi(request->client,request->Path,request->Method,request->Query);
+		}else//TEXT FILE
+		{
+			request->StaticMsg.StatusCode=200;
+			ResponseStaticFiles(request,request->Path); 
+		}
+	}else
+	{
+		ResponseError(request);
+	}
+}
+int ResponseStaticFiles(RESPONSE_MSG *request,const char *path) 
+{
+	char buf[MAXBUFSIZE];
+	int StatusCode=request->StaticMsg.StatusCode;
+	Send_ResponseLineToClient(request->client,StatusCode,Get_ErrorDes(StatusCode));
+	Send_ResponseHeadToClient(request->client,"Content-Type",request->StaticMsg.ContentType);
+	//sprintf(buf,"%d",request->StaticMsg.ContentLength);
+	//Send_ResponseHeadToClient(request->client,"Content-Length",buf);
+	Send_ResponseHeadToClient(request->client,"Connection","close");
+	Send_ResponseHeadToClient(request->client,SERVER_STRING,NULL);
+	Send_ResponseBlankLineToClient(request->client);
+	Send_ResponseBodyToClient(request->client,path);
+}
+
+
+int ResponseError(RESPONSE_MSG *request) 
+{
+	char buf[MAXBUFSIZE];
+	int StatusCode=request->StaticMsg.StatusCode;
+	Send_ResponseLineToClient(request->client,StatusCode,Get_ErrorDes(StatusCode));
+	Send_ResponseHeadToClient(request->client,"Content-Type",request->StaticMsg.ContentType);
+	//sprintf(buf,"%d",request->StaticMsg.ContentLength);
+	//Send_ResponseHeadToClient(request->client,"Content-Length",buf);
+	Send_ResponseHeadToClient(request->client,"Connection","close");
+	Send_ResponseHeadToClient(request->client,SERVER_STRING,NULL);
+	Send_ResponseBlankLineToClient(request->client);
+	Send_ResponseBodyToClient(request->client,Get_ErrorFileFd(StatusCode));
+}
+
+int Send_ResponseLineToClient(int client,int statusCode,const char *des)
+{
+	char buf[MAXBUFSIZE];
+	if(des==NULL)
+	{
+		return -1;
+	}
+	sprintf(buf, "HTTP/1.0 %d %s\r\n",statusCode,des);
+	send(client, buf, strlen(buf), 0);
+	return 0;
+}
+
+int Send_ResponseHeadToClient(int client,const char *headName,const char *value)
+{
+	char buf[MAXBUFSIZE];
+	if((headName==NULL))
+	{
+		return -1;
+	}
+	if(value ==NULL)
+	{
+		sprintf(buf, "%s\r\n",headName);
+	}else
+	{
+		sprintf(buf, "%s: %s\r\n",headName,value);
+	}
+	send(client, buf, strlen(buf), 0);
+	return 0;
+}
+
+int Send_ResponseBlankLineToClient(int client)
+{
+	send(client, "\r\n", 2, 0);
+	return 0;
+}
+
+int Send_ResponseBodyToClient(int client,const char *path)
+{
+	char buf[MAXBUFSIZE];
+	int n=0;
+	int fd;
+	if((fd=open(path,O_RDONLY))==-1)
+	{
+		sprintf(buf,"In \"Send_ResponseBodyToClient\"function open %s file failure!",path);
+		WriteLogtoFile(501,buf);
+		return -1;
+	}
+	while((n=read(fd,buf,MAXBUFSIZE))!=0)
+	{
+		send(client, buf, n, 0);
+	}
+	close(fd);
+	return 0;
+}
+
+char *Get_ErrorDes(int StatusCode)
+{
+	int i=0;
+	while(i<MAXERRORLISTNUM)
+	{
+		if(ErrorMap[i]==StatusCode)
+		{
+			return ErrorDes[i];
+		}
+		i++;
+	}
+	return ErrorDes[0];
+}
+char *Get_ErrorFileFd(int StatusCode)
+{
+	int i=0;
+	while(i<MAXERRORLISTNUM)
+	{
+		if(ErrorMap[i]==StatusCode)
+		{
+			return ErrorFile[i];
+		}
+		i++;
+	}
+	return ErrorFile[0];
+}
+int WriteLogtoFile(int errno,const char *msg)
+{
+	int fd;
+	char *buf;
+	time_t timer;
+	struct tm *ptime;
+	buf=(char *)malloc(sizeof(char)*MAXBUFSIZE); //申请文件缓冲区BUFSIZEByte
+	if(buf==NULL)
+	{
+		return -1;
+	}	
+	timer=time(NULL);
+	ptime=localtime(&timer);                //转换为本地时间
+    sprintf(buf,"%d-%2d-%2d %2d:%2d:%2d ERROR[%d]:%s \n",(1900+ptime->tm_year),ptime->tm_mon+1,ptime->tm_mday,ptime->tm_hour,ptime->tm_min,ptime->
+    tm_sec,errno,msg);
+	fd=open(LOGFILE_DIR,O_WRONLY|O_APPEND|O_CREAT,755);
+	if(fd==-1)
+	{
+		return -1;
+	}
+	write(fd,buf,strlen(buf));
+	close(fd);
+	free(buf);
+	return 0;
+}
 
 int main(void)
 {
- int server_sock = -1;
- u_short port = 0;
- int client_sock = -1;
- struct sockaddr_in client_name;
- int client_name_len = sizeof(client_name);
- pthread_t newthread;
+	int server_sock = -1;
+	u_short port = 8855;
+	int client_sock = -1;
+	struct sockaddr_in client_name;
+	int client_name_len = sizeof(client_name);
+	pthread_t newthread;
 
- server_sock = startup(&port);
- printf("httpd running on port %d\n", port);
+	server_sock = Startup(&port);
+	printf("httpd running on port %d\n", port);
 
- while (1)
- {
-  client_sock = accept(server_sock,
-                       (struct sockaddr *)&client_name,
-                       &client_name_len);
-  if (client_sock == -1)
-   error_die("accept");
- /* accept_request(client_sock); */
- if (pthread_create(&newthread , NULL, accept_request, client_sock) != 0)
-   perror("pthread_create");
- }
+	while (1)
+	{
+		client_sock = accept(server_sock,(struct sockaddr *)&client_name,&client_name_len);
+		if (client_sock == -1)
+		{
+			error_die("accept");
+		}
+		if (pthread_create(&newthread , NULL, Deal_Request, client_sock) != 0)
+		{
+			perror("pthread_create");
+		}
+	}
 
- close(server_sock);
+	close(server_sock);
 
- return(0);
+	return(0);
 }
