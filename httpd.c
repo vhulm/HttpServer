@@ -64,7 +64,7 @@ typedef struct
 	char ProtocolVersion[10];
 	int StatusCode;
 	char *Des;
-	char ContentType[100];
+	char ContentType[50];
 	long int ContentLength;
 }RESPONSE_STATIC_MSG;
 
@@ -95,17 +95,25 @@ void execute_cgi(int, const char *, const char *, const char *);
 int get_line(int, char *, int);
 
 int Startup(u_short *);
+
 void Deal_Request(int client);
-char *Get_ErrorDes(int StatusCode);	//根据错误码返回http响应行描述信息，如果列表找不到返回第一条记录
-char *Get_ErrorFileFd(int StatusCode);//根据错误码返回错误页路径，如果列表找不到返回第一条记录
+
 int ParseRequest(int client,RESPONSE_MSG *request);
 int CheckRequest(RESPONSE_MSG *request);
 int ResponseClient(RESPONSE_MSG *request);
+
+int ResponseStaticFiles(RESPONSE_MSG *request,const char *path);
+int ResponseError(RESPONSE_MSG *request);
 
 int Send_ResponseLineToClient(int client,int statusCode,const char *des);
 int Send_ResponseHeadToClient(int client,const char *headName,const char *value);
 int Send_ResponseBlankLineToClient(int client);
 int Send_ResponseBodyToClient(int client,const char *path);
+
+int Get_ImageFileType(RESPONSE_MSG *request);
+char *Get_ErrorDes(int StatusCode);	//根据错误码返回http响应行描述信息，如果列表找不到返回第一条记录
+char *Get_ErrorFileFd(int StatusCode);//根据错误码返回错误页路径，如果列表找不到返回第一条记录
+
 
 int WriteLogtoFile(int errno,const char *msg);
 
@@ -469,6 +477,7 @@ int CheckRequest(RESPONSE_MSG *request)
 		}else
 		{
 			request->StaticMsg.ContentLength=st.st_size+2;
+			Get_ImageFileType(request);
 		}
 		if ((st.st_mode & S_IXUSR) ||(st.st_mode & S_IXGRP) ||(st.st_mode & S_IXOTH))
 		{
@@ -584,6 +593,42 @@ int Send_ResponseBodyToClient(int client,const char *path)
 	return 0;
 }
 
+int Get_ImageFileType(RESPONSE_MSG *request)
+{
+	int fd;
+	char buf[10];
+	char BMP[2]={0x42,0x4D};
+	char JPG[2]={0xff,0xd8};
+	if((fd=open(request->Path,O_RDONLY))==-1)
+	{
+		request->ErrorCode=-1;
+		request->StaticMsg.StatusCode=404;
+		return -1;
+	}
+	read(fd,buf,10);
+	if((memcmp(&buf[1],"PNG",3)==0))
+	{
+		sprintf(request->StaticMsg.ContentType,"image/png");
+	}else if((memcmp(buf,"GIF89a",6)==0)||(memcmp(buf,"GIF87a",6)==0))
+	{
+		sprintf(request->StaticMsg.ContentType,"image/gif");
+	}else if((memcmp(buf,JPG,2)==0))
+	{
+		sprintf(request->StaticMsg.ContentType,"image/jpg");
+		printf("jpg\n");
+	}else if((memcmp(&buf[1],"PNG",3)==0))
+	{
+		sprintf(request->StaticMsg.ContentType,"image/png");
+	}else if(memcmp(buf,BMP,2)==0)
+	{
+		sprintf(request->StaticMsg.ContentType,"image/bmp");
+	}else
+	{
+		sprintf(request->StaticMsg.ContentType,"");
+	}
+	close(fd);
+	return 0;
+}
 char *Get_ErrorDes(int StatusCode)
 {
 	int i=0;
