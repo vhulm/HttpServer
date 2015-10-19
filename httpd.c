@@ -65,7 +65,7 @@ typedef struct
 	int StatusCode;
 	char *Des;
 	char ContentType[100];
-	int ContentLength;
+	long int ContentLength;
 }RESPONSE_STATIC_MSG;
 
 typedef struct
@@ -461,6 +461,14 @@ int CheckRequest(RESPONSE_MSG *request)
 		if ((st.st_mode & S_IFMT) == S_IFDIR)
 		{
 			strcat(request->Path, "/index.html");
+			if (stat(request->Path, &st) != -1) 
+			{
+				request->StaticMsg.ContentLength=st.st_size+2;
+			}
+			
+		}else
+		{
+			request->StaticMsg.ContentLength=st.st_size+2;
 		}
 		if ((st.st_mode & S_IXUSR) ||(st.st_mode & S_IXGRP) ||(st.st_mode & S_IXOTH))
 		{
@@ -493,8 +501,8 @@ int ResponseStaticFiles(RESPONSE_MSG *request,const char *path)
 	int StatusCode=request->StaticMsg.StatusCode;
 	Send_ResponseLineToClient(request->client,StatusCode,Get_ErrorDes(StatusCode));
 	Send_ResponseHeadToClient(request->client,"Content-Type",request->StaticMsg.ContentType);
-	//sprintf(buf,"%d",request->StaticMsg.ContentLength);
-	//Send_ResponseHeadToClient(request->client,"Content-Length",buf);
+	sprintf(buf,"%ld",request->StaticMsg.ContentLength);
+	Send_ResponseHeadToClient(request->client,"Content-Length",buf);
 	Send_ResponseHeadToClient(request->client,"Connection","close");
 	Send_ResponseHeadToClient(request->client,SERVER_STRING,NULL);
 	Send_ResponseBlankLineToClient(request->client);
@@ -505,11 +513,16 @@ int ResponseStaticFiles(RESPONSE_MSG *request,const char *path)
 int ResponseError(RESPONSE_MSG *request) 
 {
 	char buf[MAXBUFSIZE];
+	struct stat st;
 	int StatusCode=request->StaticMsg.StatusCode;
+	if (stat(Get_ErrorFileFd(StatusCode), &st) != -1) 
+	{
+		request->StaticMsg.ContentLength=st.st_size+2;
+	}
 	Send_ResponseLineToClient(request->client,StatusCode,Get_ErrorDes(StatusCode));
 	Send_ResponseHeadToClient(request->client,"Content-Type",request->StaticMsg.ContentType);
-	//sprintf(buf,"%d",request->StaticMsg.ContentLength);
-	//Send_ResponseHeadToClient(request->client,"Content-Length",buf);
+	sprintf(buf,"%ld",request->StaticMsg.ContentLength);
+	Send_ResponseHeadToClient(request->client,"Content-Length",buf);
 	Send_ResponseHeadToClient(request->client,"Connection","close");
 	Send_ResponseHeadToClient(request->client,SERVER_STRING,NULL);
 	Send_ResponseBlankLineToClient(request->client);
