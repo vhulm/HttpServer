@@ -12,6 +12,19 @@
  *  4) Uncomment the line that runs accept_request().
  *  5) Remove -lsocket from the Makefile.
  */
+ /*
+ 在Deal_Request函数中的
+int LoadControl(int client,RESPONSE_MSG *request);
+int AccessChecking(int client,RESPONSE_MSG *request);
+int ParseRequest(int client,RESPONSE_MSG *request);
+int CheckRequest(RESPONSE_MSG *request);
+int ResponseClient(RESPONSE_MSG *request);
+如果没用错误发生则返回0，如果有不致命错误发生
+设置RESPONSE_MSG中的错误码，同时返回0
+如果发生致命错误设置错误码，同时返回非0值
+ Deal_Request中检查到非0值返回简单处理后终止线程
+
+ */
 #include <stdio.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -30,33 +43,40 @@
 //printf("%s\n%s\n%s\n%s\n",request->Method,request->URL,request->Path,request->Query);
 //while(1);
 
+typedef enum {DISABLE = 0, ENABLE = !DISABLE} FunctionalState;
 
-#define MAXBUFSIZE (4096)
+#define MAXBUFSIZE	(4096)
+#define ALLOW_MAX_CONNECTION (20)
 
-#define ISspace(x) isspace((int)(x))
+#define ISspace(x)	(isspace((int)(x)))
 
-#define LOGFILE_DIR "./log.txt"
-#define SERVER_STRING "Server: HttpServer/0.1.0\r\n"
+#define LOGFILE_DIR	"./log.txt"
+#define SERVER_STRING	"Server: HttpServer/0.1.0\r\n"
 
-#define MAXERRORLISTNUM 4
+#define ACCESS_CHECKING	(ENABLE)
+#define LOAD_CONTROL	(ENABLE)
+
+#define MAX_ERROR_LIST_NUM	(5)
 #define RESPONSE_NO_ERROR(STATUS) ((STATUS)!=(-1))
 #define CGI_FILE (1)
 #define ISCGI_FILE(type)  ((type)!=(0))
 
 
 //以下三个结构必须被正确初始化
-const int ErrorMap[MAXERRORLISTNUM]={001,200,404,501};
+const int ErrorMap[MAX_ERROR_LIST_NUM]={001,200,404,500,503};
 
-const char * const ErrorDes[MAXERRORLISTNUM]={	"001", //001
+const char * const ErrorDes[MAX_ERROR_LIST_NUM]={	"001", //001
 									"OK",	//200
 									"This web page not found!",//404
-									"501", //501
+									"500",
+									"503"
 									};
 					
-const char * const ErrorFile[MAXERRORLISTNUM]={	"001.html",
+const char * const ErrorFile[MAX_ERROR_LIST_NUM]={	"001.html",
 									NULL,
 									"htdocs/404.html",
-									"htdocs/501.html",
+									"htdocs/500.html",
+									"htdocs/503.html"
 									};
 
 typedef struct
@@ -86,6 +106,9 @@ typedef struct
 	RESPONSE_CGI_MSG CgiMsg;
 }RESPONSE_MSG;
 
+int ConnectionNum=0;
+
+
 void accept_request(int);
 void bad_request(int);
 void cat(int, FILE *);
@@ -98,7 +121,8 @@ int Startup(u_short *);
 
 void *Deal_Request(void *psocket);
 
-
+int LoadControl(int client,RESPONSE_MSG *request);
+int AccessChecking(int client,RESPONSE_MSG *request);
 int ParseRequest(int client,RESPONSE_MSG *request);
 int CheckRequest(RESPONSE_MSG *request);
 int ResponseClient(RESPONSE_MSG *request);
@@ -378,15 +402,67 @@ void *Deal_Request(void *psocket)
 	int client=*((int *)psocket);
 	RESPONSE_MSG msg_client;
 	memset(&msg_client,0,sizeof(msg_client));
-	ParseRequest(client,&msg_client);
-	CheckRequest(&msg_client);
-	ResponseClient(&msg_client);
+	if(LoadControl(client,&msg_client)!=0)
+	{
+		close(client);
+		ConnectionNum--;
+		return (NULL);
+	}
+	if(AccessChecking(client,&msg_client)!=0)
+	{
+		close(client);
+		ConnectionNum--;
+		return (NULL);
+	}
+	if(ParseRequest(client,&msg_client)!=0)
+	{
+		close(client);
+		ConnectionNum--;
+		return (NULL);
+	}
+	if(CheckRequest(&msg_client)!=0)
+	{
+		close(client);
+		ConnectionNum--;
+		return (NULL);	
+	}
+	if(ResponseClient(&msg_client)!=0)
+	{
+		close(client);
+		ConnectionNum--;
+		return (NULL);
+	}
 	printf("%s\n%s\n%s\n%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.Query);
- 	close(msg_client.client);
+ 	close(client);
+	ConnectionNum--;
 	return ((void*)(NULL));
 }
 
+int AccessChecking(int client,RESPONSE_MSG *request)
+{
+	(void)client;
+	(void)request;
+#if (ACCESS_CHECKING==ENABLE)
+	return 0;
+#elif(ACCESS_CHECKING==DISABLE)
+	return 0;
+#endif
+}
 
+int LoadControl(int client,RESPONSE_MSG *request)
+{
+	(void)client;
+	if(ConnectionNum>ALLOW_MAX_CONNECTION)
+	{
+		request->ErrorCode=-1;
+		request->StaticMsg.StatusCode=503;//The file is not found
+		ResponseError(request); 
+		return -1;
+	}else
+	{
+		return 0;
+	}
+}
 
 int ParseRequest(int client,RESPONSE_MSG *request)
 {
@@ -645,7 +721,7 @@ int Get_ImageFileType(RESPONSE_MSG *request)
 const char *Get_ErrorDes(int StatusCode)
 {
 	int i=0;
-	while(i<MAXERRORLISTNUM)
+	while(i<MAX_ERROR_LIST_NUM)
 	{
 		if(ErrorMap[i]==StatusCode)
 		{
@@ -658,7 +734,7 @@ const char *Get_ErrorDes(int StatusCode)
 const char *Get_ErrorFileFd(int StatusCode)
 {
 	int i=0;
-	while(i<MAXERRORLISTNUM)
+	while(i<MAX_ERROR_LIST_NUM)
 	{
 		if(ErrorMap[i]==StatusCode)
 		{
@@ -713,8 +789,10 @@ int main(void)
 		{
 			error_die("accept");
 		}
+		ConnectionNum++;
 		if (pthread_create(&newthread , NULL, Deal_Request, (void *)&client_sock) != 0)
 		{
+			ConnectionNum--;
 			perror("pthread_create");
 		}
 	}
