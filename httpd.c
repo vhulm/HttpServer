@@ -96,7 +96,8 @@ int get_line(int, char *, int);
 
 int Startup(u_short *);
 
-void Deal_Request(int client);
+void *Deal_Request(void *psocket);
+
 
 int ParseRequest(int client,RESPONSE_MSG *request);
 int CheckRequest(RESPONSE_MSG *request);
@@ -111,8 +112,8 @@ int Send_ResponseBlankLineToClient(int client);
 int Send_ResponseBodyToClient(int client,const char *path);
 
 int Get_ImageFileType(RESPONSE_MSG *request);
-char *Get_ErrorDes(int StatusCode);	//根据错误码返回http响应行描述信息，如果列表找不到返回第一条记录
-char *Get_ErrorFileFd(int StatusCode);//根据错误码返回错误页路径，如果列表找不到返回第一条记录
+const char *Get_ErrorDes(int StatusCode);	//根据错误码返回http响应行描述信息，如果列表找不到返回第一条记录
+const char *Get_ErrorFileFd(int StatusCode);//根据错误码返回错误页路径，如果列表找不到返回第一条记录
 
 
 int WriteLogtoFile(int errno,const char *msg);
@@ -335,39 +336,46 @@ int get_line(int sock, char *buf, int size)
 /**********************************************************************/
 int Startup(u_short *port)
 {
- int httpd = 0;
- struct sockaddr_in name;
+	int httpd = 0;
+	struct sockaddr_in name;
 
- httpd = socket(PF_INET, SOCK_STREAM, 0);
- if (httpd == -1)
-  error_die("socket");
- memset(&name, 0, sizeof(name));
- name.sin_family = AF_INET;
- name.sin_port = htons(*port);
- name.sin_addr.s_addr = htonl(INADDR_ANY);
-int on=1;
-if(setsockopt(httpd,SOL_SOCKET,SO_REUSEADDR,&on,sizeof(on))<0)
-{
-	printf("setsockopt error!\n");	
-	exit(-5);
-}
- if (bind(httpd, (struct sockaddr *)&name, sizeof(name)) < 0)
-  error_die("bind");
- if (*port == 0)  /* if dynamically allocating a port */
- {
-  int namelen = sizeof(name);
-  if (getsockname(httpd, (struct sockaddr *)&name, &namelen) == -1)
-   error_die("getsockname");
-  *port = ntohs(name.sin_port);
- }
- if (listen(httpd, 5) < 0)
-  error_die("listen");
- return(httpd);
+	httpd = socket(PF_INET, SOCK_STREAM, 0);
+	if (httpd == -1)
+	error_die("socket");
+	memset(&name, 0, sizeof(name));
+	name.sin_family = AF_INET;
+	name.sin_port = htons(*port);
+	name.sin_addr.s_addr = htonl(INADDR_ANY);
+	int on=1;
+	if(setsockopt(httpd,SOL_SOCKET,SO_REUSEADDR,&on,sizeof(on))<0)
+	{
+		printf("setsockopt error!\n");	
+		exit(-5);
+	}
+	if (bind(httpd, (struct sockaddr *)&name, sizeof(name)) < 0)
+	{
+		error_die("bind");
+	}
+	if (*port == 0)  /* if dynamically allocating a port */
+	{
+		socklen_t namelen = sizeof(name);
+		if (getsockname(httpd, (struct sockaddr *)&name, &namelen) == -1)
+		{
+			error_die("getsockname");
+		}
+		*port = ntohs(name.sin_port);
+	}
+	if (listen(httpd, 5) < 0)
+	{
+		error_die("listen");
+	}
+	return(httpd);
 }
 
 /**********************************************************************/
-void Deal_Request(int client)
+void *Deal_Request(void *psocket)
 {
+	int client=*((int *)psocket);
 	RESPONSE_MSG msg_client;
 	memset(&msg_client,0,sizeof(msg_client));
 	ParseRequest(client,&msg_client);
@@ -375,6 +383,7 @@ void Deal_Request(int client)
 	ResponseClient(&msg_client);
 	printf("%s\n%s\n%s\n%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.Query);
  	close(msg_client.client);
+	return ((void*)(NULL));
 }
 
 
@@ -450,7 +459,7 @@ int ParseRequest(int client,RESPONSE_MSG *request)
 	{
 		numchars = get_line(client, buf, sizeof(buf));
 	}
-
+	return 0;
 }
 int CheckRequest(RESPONSE_MSG *request)
 {
@@ -485,6 +494,7 @@ int CheckRequest(RESPONSE_MSG *request)
 		}
 		
 	}
+	return 0;
 }
 
 int ResponseClient(RESPONSE_MSG *request)
@@ -503,6 +513,7 @@ int ResponseClient(RESPONSE_MSG *request)
 	{
 		ResponseError(request);
 	}
+	return 0;
 }
 int ResponseStaticFiles(RESPONSE_MSG *request,const char *path) 
 {
@@ -516,6 +527,7 @@ int ResponseStaticFiles(RESPONSE_MSG *request,const char *path)
 	Send_ResponseHeadToClient(request->client,SERVER_STRING,NULL);
 	Send_ResponseBlankLineToClient(request->client);
 	Send_ResponseBodyToClient(request->client,path);
+	return 0;
 }
 
 
@@ -536,6 +548,7 @@ int ResponseError(RESPONSE_MSG *request)
 	Send_ResponseHeadToClient(request->client,SERVER_STRING,NULL);
 	Send_ResponseBlankLineToClient(request->client);
 	Send_ResponseBodyToClient(request->client,Get_ErrorFileFd(StatusCode));
+	return 0;
 }
 
 int Send_ResponseLineToClient(int client,int statusCode,const char *des)
@@ -624,12 +637,12 @@ int Get_ImageFileType(RESPONSE_MSG *request)
 		sprintf(request->StaticMsg.ContentType,"image/bmp");
 	}else
 	{
-		sprintf(request->StaticMsg.ContentType,"");
+		sprintf(request->StaticMsg.ContentType,"%s","\0");
 	}
 	close(fd);
 	return 0;
 }
-char *Get_ErrorDes(int StatusCode)
+const char *Get_ErrorDes(int StatusCode)
 {
 	int i=0;
 	while(i<MAXERRORLISTNUM)
@@ -642,7 +655,7 @@ char *Get_ErrorDes(int StatusCode)
 	}
 	return ErrorDes[0];
 }
-char *Get_ErrorFileFd(int StatusCode)
+const char *Get_ErrorFileFd(int StatusCode)
 {
 	int i=0;
 	while(i<MAXERRORLISTNUM)
@@ -687,7 +700,7 @@ int main(void)
 	u_short port = 8855;
 	int client_sock = -1;
 	struct sockaddr_in client_name;
-	int client_name_len = sizeof(client_name);
+	socklen_t client_name_len = sizeof(client_name);
 	pthread_t newthread;
 
 	server_sock = Startup(&port);
@@ -700,7 +713,7 @@ int main(void)
 		{
 			error_die("accept");
 		}
-		if (pthread_create(&newthread , NULL, Deal_Request, client_sock) != 0)
+		if (pthread_create(&newthread , NULL, Deal_Request, (void *)&client_sock) != 0)
 		{
 			perror("pthread_create");
 		}
