@@ -96,6 +96,7 @@ typedef struct
 typedef struct
 {
 	int client;
+	char ClientIP[22];
 	int ParseState;
 	int ErrorCode;
 	char Method[10];
@@ -135,6 +136,8 @@ int Send_ResponseHeadToClient(int client,const char *headName,const char *value)
 int Send_ResponseBlankLineToClient(int client);
 int Send_ResponseBodyToClient(int client,const char *path);
 
+
+int IPMatch(const char *ClientIP);
 int Get_ImageFileType(RESPONSE_MSG *request);
 const char *Get_ErrorDes(int StatusCode);	//根据错误码返回http响应行描述信息，如果列表找不到返回第一条记录
 const char *Get_ErrorFileFd(int StatusCode);//根据错误码返回错误页路径，如果列表找不到返回第一条记录
@@ -410,7 +413,7 @@ void *Deal_Request(void *psocket)
 	}
 	if(AccessChecking(client,&msg_client)!=0)
 	{
-		close(client);
+		//close(client);
 		ConnectionNum--;
 		return (NULL);
 	}
@@ -440,15 +443,39 @@ void *Deal_Request(void *psocket)
 
 int AccessChecking(int client,RESPONSE_MSG *request)
 {
-	(void)client;
-	(void)request;
+	struct sockaddr_in peeraddr;
+	socklen_t namelen = sizeof(peeraddr);
+	request->client=client;
 #if (ACCESS_CHECKING==ENABLE)
-	return 0;
+	if (getpeername(client,(struct sockaddr *)&peeraddr, &namelen) != -1)
+	{
+		sprintf(request->ClientIP,"%s",(char *)inet_ntoa(peeraddr.sin_addr));
+		printf("Client IP:%s\n",request->ClientIP);
+	}else
+	{
+		printf("Failed to get the customer IP\n");
+	}
+	if(IPMatch(request->ClientIP)==0)
+	{
+		request->ErrorCode=-1;
+		request->StaticMsg.StatusCode=503;//The file is not found
+		ResponseError(request); 
+		return -1;
+	}else
+	{
+		return 0;
+	}
 #elif(ACCESS_CHECKING==DISABLE)
 	return 0;
 #endif
 }
 
+int IPMatch(const char *ClientIP)
+{
+	(void)ClientIP;
+	return 0;
+}
+	
 int LoadControl(int client,RESPONSE_MSG *request)
 {
 	(void)client;
@@ -617,12 +644,14 @@ int ResponseError(RESPONSE_MSG *request)
 		request->StaticMsg.ContentLength=st.st_size+2;
 	}
 	Send_ResponseLineToClient(request->client,StatusCode,Get_ErrorDes(StatusCode));
+	printf("%s\n",Get_ErrorDes(StatusCode));
 	Send_ResponseHeadToClient(request->client,"Content-Type",request->StaticMsg.ContentType);
 	sprintf(buf,"%ld",request->StaticMsg.ContentLength);
 	Send_ResponseHeadToClient(request->client,"Content-Length",buf);
 	Send_ResponseHeadToClient(request->client,"Connection","close");
 	Send_ResponseHeadToClient(request->client,SERVER_STRING,NULL);
 	Send_ResponseBlankLineToClient(request->client);
+	printf("%s\n",Get_ErrorFileFd(StatusCode));
 	Send_ResponseBodyToClient(request->client,Get_ErrorFileFd(StatusCode));
 	return 0;
 }
