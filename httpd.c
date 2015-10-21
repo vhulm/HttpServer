@@ -46,38 +46,17 @@ int ResponseClient(RESPONSE_MSG *request);
 typedef enum {DISABLE = 0, ENABLE = !DISABLE} FunctionalState;
 
 #define MAXBUFSIZE	(4096)
-#define ALLOW_MAX_CONNECTION (20)
-
-#define ISspace(x)	(isspace((int)(x)))
 
 #define LOGFILE_DIR	"./log.txt"
 #define SERVER_STRING	"Server: HttpServer/0.1.0\r\n"
 
-#define ACCESS_CHECKING	(ENABLE)
-#define LOAD_CONTROL	(ENABLE)
+//#define ACCESS_CHECKING_ENABLE
+#define ALLOW_MAX_CONNECTION (20)
 
-#define MAX_ERROR_LIST_NUM	(5)
 #define RESPONSE_NO_ERROR(STATUS) ((STATUS)!=(-1))
 #define CGI_FILE (1)
 #define ISCGI_FILE(type)  ((type)!=(0))
-
-
-//以下三个结构必须被正确初始化
-const int ErrorMap[MAX_ERROR_LIST_NUM]={001,200,404,500,503};
-
-const char * const ErrorDes[MAX_ERROR_LIST_NUM]={	"001", //001
-									"OK",	//200
-									"This web page not found!",//404
-									"500",
-									"503"
-									};
-					
-const char * const ErrorFile[MAX_ERROR_LIST_NUM]={	"001.html",
-									NULL,
-									"htdocs/404.html",
-									"htdocs/500.html",
-									"htdocs/503.html"
-									};
+#define ISspace(x)	(isspace((int)(x)))
 
 typedef struct
 {
@@ -107,8 +86,22 @@ typedef struct
 	RESPONSE_CGI_MSG CgiMsg;
 }RESPONSE_MSG;
 
-int ConnectionNum=0;
+typedef struct
+{
+	int ErrorNum;
+	const char *const ErrorDes;
+	const char *const ErrorFile;
+}ERROR_MSG;
 
+const ERROR_MSG ReqError[]={{001,"des 001","htdocs/001.html"},
+							{200,"OK!",NULL},
+							{404,"This web page not found!","htdocs/404.html"},
+							{500,"des 500","htdocs/500.html"},
+							{503,"des 503","htdocs/503.html"},
+															};
+#define MAX_ERROR_LIST_NUM	((sizeof(ReqError))/(sizeof(ERROR_MSG)))
+
+int ConnectionNum=0;
 
 void accept_request(int);
 void bad_request(int);
@@ -443,10 +436,12 @@ void *Deal_Request(void *psocket)
 
 int AccessChecking(int client,RESPONSE_MSG *request)
 {
+	(void)client;
+	(void)request;
+#ifdef ACCESS_CHECKING_ENABLE
 	struct sockaddr_in peeraddr;
 	socklen_t namelen = sizeof(peeraddr);
 	request->client=client;
-#if (ACCESS_CHECKING==ENABLE)
 	if (getpeername(client,(struct sockaddr *)&peeraddr, &namelen) != -1)
 	{
 		sprintf(request->ClientIP,"%s",(char *)inet_ntoa(peeraddr.sin_addr));
@@ -465,7 +460,7 @@ int AccessChecking(int client,RESPONSE_MSG *request)
 	{
 		return 0;
 	}
-#elif(ACCESS_CHECKING==DISABLE)
+#else
 	return 0;
 #endif
 }
@@ -583,12 +578,12 @@ int CheckRequest(RESPONSE_MSG *request)
 			strcat(request->Path, "/index.html");
 			if (stat(request->Path, &st) != -1) 
 			{
-				request->StaticMsg.ContentLength=st.st_size+2;
+				request->StaticMsg.ContentLength=st.st_size;
 			}
 			
 		}else
 		{
-			request->StaticMsg.ContentLength=st.st_size+2;
+			request->StaticMsg.ContentLength=st.st_size;
 			Get_ImageFileType(request);
 		}
 		if ((st.st_mode & S_IXUSR) ||(st.st_mode & S_IXGRP) ||(st.st_mode & S_IXOTH))
@@ -627,7 +622,7 @@ int ResponseStaticFiles(RESPONSE_MSG *request,const char *path)
 	sprintf(buf,"%ld",request->StaticMsg.ContentLength);
 	Send_ResponseHeadToClient(request->client,"Content-Length",buf);
 	Send_ResponseHeadToClient(request->client,"Connection","close");
-	Send_ResponseHeadToClient(request->client,SERVER_STRING,NULL);
+	//Send_ResponseHeadToClient(request->client,SERVER_STRING,NULL);
 	Send_ResponseBlankLineToClient(request->client);
 	Send_ResponseBodyToClient(request->client,path);
 	return 0;
@@ -749,29 +744,29 @@ int Get_ImageFileType(RESPONSE_MSG *request)
 }
 const char *Get_ErrorDes(int StatusCode)
 {
-	int i=0;
+	unsigned int i=0;
 	while(i<MAX_ERROR_LIST_NUM)
 	{
-		if(ErrorMap[i]==StatusCode)
+		if(ReqError[i].ErrorNum==StatusCode)
 		{
-			return ErrorDes[i];
+			return ReqError[i].ErrorDes;
 		}
 		i++;
 	}
-	return ErrorDes[0];
+	return ReqError[0].ErrorDes;
 }
 const char *Get_ErrorFileFd(int StatusCode)
 {
-	int i=0;
+	unsigned int i=0;
 	while(i<MAX_ERROR_LIST_NUM)
 	{
-		if(ErrorMap[i]==StatusCode)
+		if(ReqError[i].ErrorNum==StatusCode)
 		{
-			return ErrorFile[i];
+			return ReqError[i].ErrorFile;
 		}
 		i++;
 	}
-	return ErrorFile[0];
+	return ReqError[0].ErrorFile;
 }
 int WriteLogtoFile(int errno,const char *msg)
 {
@@ -807,7 +802,7 @@ int main(void)
 	struct sockaddr_in client_name;
 	socklen_t client_name_len = sizeof(client_name);
 	pthread_t newthread;
-
+	
 	server_sock = Startup(&port);
 	printf("httpd running on port %d\n", port);
 
