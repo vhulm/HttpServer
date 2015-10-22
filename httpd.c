@@ -39,11 +39,15 @@ int ResponseClient(RESPONSE_MSG *request);
 #include <sys/wait.h>
 #include <stdlib.h>
 #include <fcntl.h>
+#include <errno.h>
+#include <stdarg.h>
+#include <time.h>
 
 //printf("%s\n%s\n%s\n%s\n",request->Method,request->URL,request->Path,request->Query);
 //while(1);
+extern int error;
 
-typedef enum {DISABLE = 0, ENABLE = !DISABLE} FunctionalState;
+#define DEBUG
 
 #define MAXBUFSIZE	(4096)
 
@@ -136,7 +140,7 @@ const char *Get_ErrorDes(int StatusCode);	//根据错误码返回http响应行描述信息，如
 const char *Get_ErrorFileFd(int StatusCode);//根据错误码返回错误页路径，如果列表找不到返回第一条记录
 
 
-int WriteLogtoFile(int errno,const char *msg);
+int WriteLogtoFile(int err,const char *fmt,...);
 
 
 /**********************************************************************/
@@ -369,25 +373,33 @@ int Startup(u_short *port)
 	int on=1;
 	if(setsockopt(httpd,SOL_SOCKET,SO_REUSEADDR,&on,sizeof(on))<0)
 	{
-		printf("setsockopt error!\n");	
+		WriteLogtoFile(error,"SYS setsockopt error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
+		WriteLogtoFile(0,"INF The server to start to fail!\n");
 		exit(-5);
 	}
 	if (bind(httpd, (struct sockaddr *)&name, sizeof(name)) < 0)
 	{
-		error_die("bind");
+		WriteLogtoFile(error,"SYS bind error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
+		WriteLogtoFile(0,"INF The server to start to fail!\n");
+		exit(-4);
 	}
 	if (*port == 0)  /* if dynamically allocating a port */
 	{
 		socklen_t namelen = sizeof(name);
 		if (getsockname(httpd, (struct sockaddr *)&name, &namelen) == -1)
 		{
-			error_die("getsockname");
+			WriteLogtoFile(error,"SYS getsockname error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
+			WriteLogtoFile(0,"INF The server to start to fail!\n");
+			exit(-3);
 		}
 		*port = ntohs(name.sin_port);
 	}
 	if (listen(httpd, 5) < 0)
 	{
-		error_die("listen");
+		WriteLogtoFile(error,"SYS listen error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
+		WriteLogtoFile(0,"INF The server to start to fail!\n");
+		exit(-3);
+
 	}
 	return(httpd);
 }
@@ -428,7 +440,7 @@ void *Deal_Request(void *psocket)
 		ConnectionNum--;
 		return (NULL);
 	}
-	printf("%s\n%s\n%s\n%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.Query);
+	WriteLogtoFile(9,"client Request method:%s URL:%s File path:%s Query:%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.Query);
  	close(client);
 	ConnectionNum--;
 	return ((void*)(NULL));
@@ -445,10 +457,10 @@ int AccessChecking(int client,RESPONSE_MSG *request)
 	if (getpeername(client,(struct sockaddr *)&peeraddr, &namelen) != -1)
 	{
 		sprintf(request->ClientIP,"%s",(char *)inet_ntoa(peeraddr.sin_addr));
-		printf("Client IP:%s\n",request->ClientIP);
+		WriteLogtoFile(2,"INF Client IP:%s\n",request->ClientIP);
 	}else
 	{
-		printf("Failed to get the customer IP\n");
+		WriteLogtoFile(error,"SYS Failed to get the customer IP in file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
 	}
 	if(IPMatch(request->ClientIP)==0)
 	{
@@ -648,6 +660,7 @@ int ResponseError(RESPONSE_MSG *request)
 	Send_ResponseBlankLineToClient(request->client);
 	printf("%s\n",Get_ErrorFileFd(StatusCode));
 	Send_ResponseBodyToClient(request->client,Get_ErrorFileFd(StatusCode));
+	WriteLogtoFile(StatusCode,"PARE ResponseError Eorror %s\n",Get_ErrorDes(StatusCode));
 	return 0;
 }
 
@@ -694,8 +707,7 @@ int Send_ResponseBodyToClient(int client,const char *path)
 	int fd;
 	if((fd=open(path,O_RDONLY))==-1)
 	{
-		sprintf(buf,"In \"Send_ResponseBodyToClient\"function open %s file failure!",path);
-		WriteLogtoFile(501,buf);
+		WriteLogtoFile(error,"SYS Send_ResponseBodyToClient Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
 		return -1;
 	}
 	while((n=read(fd,buf,MAXBUFSIZE))!=0)
@@ -742,6 +754,7 @@ int Get_ImageFileType(RESPONSE_MSG *request)
 	close(fd);
 	return 0;
 }
+
 const char *Get_ErrorDes(int StatusCode)
 {
 	unsigned int i=0;
@@ -755,6 +768,7 @@ const char *Get_ErrorDes(int StatusCode)
 	}
 	return ReqError[0].ErrorDes;
 }
+
 const char *Get_ErrorFileFd(int StatusCode)
 {
 	unsigned int i=0;
@@ -768,12 +782,22 @@ const char *Get_ErrorFileFd(int StatusCode)
 	}
 	return ReqError[0].ErrorFile;
 }
-int WriteLogtoFile(int errno,const char *msg)
+
+/*
+SYS 服务器自身 系统调用错误错误号为系统error变量
+INF 系统提示信息Error num (0-99)
+PARE 请求解析错误Error num (100-600)
+*/
+int WriteLogtoFile(int err,const char *fmt,...)
 {
 	int fd;
 	char *buf;
 	time_t timer;
 	struct tm *ptime;
+
+	va_list ap;
+	va_start(ap,fmt);
+
 	buf=(char *)malloc(sizeof(char)*MAXBUFSIZE); //申请文件缓冲区BUFSIZEByte
 	if(buf==NULL)
 	{
@@ -781,18 +805,27 @@ int WriteLogtoFile(int errno,const char *msg)
 	}	
 	timer=time(NULL);
 	ptime=localtime(&timer);                //转换为本地时间
-    sprintf(buf,"%d-%2d-%2d %2d:%2d:%2d ERROR[%d]:%s \n",(1900+ptime->tm_year),ptime->tm_mon+1,ptime->tm_mday,ptime->tm_hour,ptime->tm_min,ptime->
-    tm_sec,errno,msg);
+
+    sprintf(buf,"%d-%2d-%2d %2d:%2d:%2d ERROR[%3d]:",(1900+ptime->tm_year),ptime->tm_mon+1,ptime->tm_mday,ptime->tm_hour,ptime->tm_min,ptime->tm_sec,err);
+	int n=strlen(buf);
+	printf("xsvsdf\n");
+	vsnprintf(buf+n,(MAXBUFSIZE-n-1),fmt,ap);
+	strcat(buf,"\n");
 	fd=open(LOGFILE_DIR,O_WRONLY|O_APPEND|O_CREAT,755);
 	if(fd==-1)
 	{
 		return -1;
 	}
 	write(fd,buf,strlen(buf));
+	#ifdef DEBUG
+		fprintf(stdout,"%s",buf);
+	#endif
+	va_end(ap);
 	close(fd);
 	free(buf);
 	return 0;
 }
+
 
 int main(void)
 {
@@ -804,23 +837,26 @@ int main(void)
 	pthread_t newthread;
 	
 	server_sock = Startup(&port);
-	printf("httpd running on port %d\n", port);
+	WriteLogtoFile(0,"INF httpd running on port %d\n", port);
 
 	while (1)
 	{
 		client_sock = accept(server_sock,(struct sockaddr *)&client_name,&client_name_len);
 		if (client_sock == -1)
 		{
-			error_die("accept");
+			WriteLogtoFile(error,"SYS accept_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
+			continue;
 		}
 		ConnectionNum++;
 		if (pthread_create(&newthread , NULL, Deal_Request, (void *)&client_sock) != 0)
 		{
 			ConnectionNum--;
-			perror("pthread_create");
+			WriteLogtoFile(error,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
 		}
 	}
-
+	
+	WriteLogtoFile(1,"INF httpd server stop!\n");
+	
 	close(server_sock);
 
 	return(0);
