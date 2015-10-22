@@ -41,17 +41,17 @@ int ResponseClient(RESPONSE_MSG *request);
 #include <fcntl.h>
 #include <errno.h>
 #include <stdarg.h>
-#include <time.h>
+#include <mqueue.h>
+
 
 //printf("%s\n%s\n%s\n%s\n",request->Method,request->URL,request->Path,request->Query);
 //while(1);
-extern int error;
+extern int errno;
 
 #define DEBUG
 
 #define MAXBUFSIZE	(4096)
 
-#define LOGFILE_DIR	"./log.txt"
 #define SERVER_STRING	"Server: HttpServer/0.1.0\r\n"
 
 //#define ACCESS_CHECKING_ENABLE
@@ -90,20 +90,7 @@ typedef struct
 	RESPONSE_CGI_MSG CgiMsg;
 }RESPONSE_MSG;
 
-typedef struct
-{
-	int ErrorNum;
-	const char *const ErrorDes;
-	const char *const ErrorFile;
-}ERROR_MSG;
 
-const ERROR_MSG ReqError[]={{001,"des 001","htdocs/001.html"},
-							{200,"OK!",NULL},
-							{404,"This web page not found!","htdocs/404.html"},
-							{500,"des 500","htdocs/500.html"},
-							{503,"des 503","htdocs/503.html"},
-															};
-#define MAX_ERROR_LIST_NUM	((sizeof(ReqError))/(sizeof(ERROR_MSG)))
 
 int ConnectionNum=0;
 
@@ -114,6 +101,8 @@ void cannot_execute(int);
 void error_die(const char *);
 void execute_cgi(int, const char *, const char *, const char *);
 int get_line(int, char *, int);
+
+void *Log_Server(void *logFileDir);
 
 int Startup(u_short *);
 
@@ -140,7 +129,41 @@ const char *Get_ErrorDes(int StatusCode);	//根据错误码返回http响应行描述信息，如
 const char *Get_ErrorFileFd(int StatusCode);//根据错误码返回错误页路径，如果列表找不到返回第一条记录
 
 
-int WriteLogtoFile(int err,const char *fmt,...);
+typedef struct
+{
+	int ErrorNum;
+	const char *const ErrorDes;
+	const char *const ErrorFile;
+}ERROR_MSG;
+
+const ERROR_MSG ReqError[]={{001,"des 001","htdocs/001.html"},
+							{200,"OK!",NULL},
+							{404,"This web page not found!","htdocs/404.html"},
+							{500,"des 500","htdocs/500.html"},
+							{503,"des 503","htdocs/503.html"},
+															};
+#define MAX_ERROR_LIST_NUM	((sizeof(ReqError))/(sizeof(ERROR_MSG)))
+
+
+#define LOGFILE_DIR	"./log.txt"
+#define LOG_SERVER_MQ_DIR "/LogServerMq"
+
+typedef struct
+{
+	const char *LogFileDir;
+	const char *MqDir;
+	mqd_t       LogMqd;
+	struct mq_attr  MqAttr;
+	struct sigevent SigEnv;
+}LOG_SERVER;
+
+LOG_SERVER LogMqServer={.LogFileDir=LOGFILE_DIR,.MqDir=LOG_SERVER_MQ_DIR};
+
+int WriteLogtoFile(LOG_SERVER *LogServerID,int err,const char *fmt,...);
+
+int Startup_LogServer(LOG_SERVER *LogServerID);
+int Register_logThread(LOG_SERVER *LogServerID);
+void Log_ServerThread(union sigval LogServerID);
 
 
 /**********************************************************************/
@@ -373,14 +396,14 @@ int Startup(u_short *port)
 	int on=1;
 	if(setsockopt(httpd,SOL_SOCKET,SO_REUSEADDR,&on,sizeof(on))<0)
 	{
-		WriteLogtoFile(error,"SYS setsockopt error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
-		WriteLogtoFile(0,"INF The server to start to fail!\n");
+		WriteLogtoFile(&LogMqServer,errno,"SYS setsockopt error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+		WriteLogtoFile(&LogMqServer,0,"INF The server to start to fail!\n");
 		exit(-5);
 	}
 	if (bind(httpd, (struct sockaddr *)&name, sizeof(name)) < 0)
 	{
-		WriteLogtoFile(error,"SYS bind error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
-		WriteLogtoFile(0,"INF The server to start to fail!\n");
+		WriteLogtoFile(&LogMqServer,errno,"SYS bind error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+		WriteLogtoFile(&LogMqServer,0,"INF The server to start to fail!\n");
 		exit(-4);
 	}
 	if (*port == 0)  /* if dynamically allocating a port */
@@ -388,16 +411,16 @@ int Startup(u_short *port)
 		socklen_t namelen = sizeof(name);
 		if (getsockname(httpd, (struct sockaddr *)&name, &namelen) == -1)
 		{
-			WriteLogtoFile(error,"SYS getsockname error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
-			WriteLogtoFile(0,"INF The server to start to fail!\n");
+			WriteLogtoFile(&LogMqServer,errno,"SYS getsockname error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+			WriteLogtoFile(&LogMqServer,0,"INF The server to start to fail!\n");
 			exit(-3);
 		}
 		*port = ntohs(name.sin_port);
 	}
 	if (listen(httpd, 5) < 0)
 	{
-		WriteLogtoFile(error,"SYS listen error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
-		WriteLogtoFile(0,"INF The server to start to fail!\n");
+		WriteLogtoFile(&LogMqServer,errno,"SYS listen error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+		WriteLogtoFile(&LogMqServer,0,"INF The server to start to fail!\n");
 		exit(-3);
 
 	}
@@ -440,7 +463,7 @@ void *Deal_Request(void *psocket)
 		ConnectionNum--;
 		return (NULL);
 	}
-	WriteLogtoFile(9,"client Request method:%s URL:%s File path:%s Query:%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.Query);
+	WriteLogtoFile(&LogMqServer,9,"client Request method:%s URL:%s File path:%s Query:%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.Query);
  	close(client);
 	ConnectionNum--;
 	return ((void*)(NULL));
@@ -457,10 +480,10 @@ int AccessChecking(int client,RESPONSE_MSG *request)
 	if (getpeername(client,(struct sockaddr *)&peeraddr, &namelen) != -1)
 	{
 		sprintf(request->ClientIP,"%s",(char *)inet_ntoa(peeraddr.sin_addr));
-		WriteLogtoFile(2,"INF Client IP:%s\n",request->ClientIP);
+		WriteLogtoFile(&LogMqServer,2,"INF Client IP:%s\n",request->ClientIP);
 	}else
 	{
-		WriteLogtoFile(error,"SYS Failed to get the customer IP in file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
+		WriteLogtoFile(&LogMqServer,errno,"SYS Failed to get the customer IP in file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 	}
 	if(IPMatch(request->ClientIP)==0)
 	{
@@ -660,7 +683,7 @@ int ResponseError(RESPONSE_MSG *request)
 	Send_ResponseBlankLineToClient(request->client);
 	printf("%s\n",Get_ErrorFileFd(StatusCode));
 	Send_ResponseBodyToClient(request->client,Get_ErrorFileFd(StatusCode));
-	WriteLogtoFile(StatusCode,"PARE ResponseError Eorror %s\n",Get_ErrorDes(StatusCode));
+	WriteLogtoFile(&LogMqServer,StatusCode,"PARE ResponseError Eorror %s\n",Get_ErrorDes(StatusCode));
 	return 0;
 }
 
@@ -707,7 +730,7 @@ int Send_ResponseBodyToClient(int client,const char *path)
 	int fd;
 	if((fd=open(path,O_RDONLY))==-1)
 	{
-		WriteLogtoFile(error,"SYS Send_ResponseBodyToClient Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
+		WriteLogtoFile(&LogMqServer,errno,"SYS Send_ResponseBodyToClient Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 		return -1;
 	}
 	while((n=read(fd,buf,MAXBUFSIZE))!=0)
@@ -788,44 +811,83 @@ SYS 服务器自身 系统调用错误错误号为系统error变量
 INF 系统提示信息Error num (0-99)
 PARE 请求解析错误Error num (100-600)
 */
-int WriteLogtoFile(int err,const char *fmt,...)
+int WriteLogtoFile(LOG_SERVER *LogServerID,int err,const char *fmt,...)
 {
-	int fd;
-	char *buf;
+	char buf[MAXBUFSIZE];
 	time_t timer;
 	struct tm *ptime;
+	
+	unsigned char prio=0;
 
 	va_list ap;
 	va_start(ap,fmt);
-
-	buf=(char *)malloc(sizeof(char)*MAXBUFSIZE); //申请文件缓冲区BUFSIZEByte
-	if(buf==NULL)
-	{
-		return -1;
-	}	
+	
 	timer=time(NULL);
 	ptime=localtime(&timer);                //转换为本地时间
 
-    sprintf(buf,"%d-%2d-%2d %2d:%2d:%2d ERROR[%3d]:",(1900+ptime->tm_year),ptime->tm_mon+1,ptime->tm_mday,ptime->tm_hour,ptime->tm_min,ptime->tm_sec,err);
-	int n=strlen(buf);
-	printf("xsvsdf\n");
-	vsnprintf(buf+n,(MAXBUFSIZE-n-1),fmt,ap);
-	strcat(buf,"\n");
-	fd=open(LOGFILE_DIR,O_WRONLY|O_APPEND|O_CREAT,755);
+    sprintf(buf,"%d-%2d-%2d %2d:%2d:%2d INFOR_ID[%3d]:",(1900+ptime->tm_year),ptime->tm_mon+1,ptime->tm_mday,ptime->tm_hour,ptime->tm_min,ptime->tm_sec,err);
+
+	vsnprintf(buf+strlen(buf),(MAXBUFSIZE-strlen(buf)-1),fmt,ap);
+	strcat(buf,"\0");
+
+	mq_send(LogServerID->LogMqd,(char *)buf,strlen(buf)+1,prio);
+	va_end(ap);
+	return 0;
+}
+
+int Startup_LogServer(LOG_SERVER *LogServerID)
+{
+	//mq_unlink(LogServerID->MqDir);
+	if((LogServerID->LogMqd = mq_open(LogServerID->MqDir,O_CREAT |O_RDWR | O_NONBLOCK,0666,NULL))==(mqd_t)-1)
+	{
+		fprintf(stderr, "mq_open error File:%s:%d %s", __FILE__, __LINE__,strerror(errno));
+		exit(-1);
+	}
+	mq_getattr(LogServerID->LogMqd,&(LogServerID->MqAttr));
+
+	LogServerID->SigEnv.sigev_notify = SIGEV_THREAD;
+	LogServerID->SigEnv.sigev_value.sival_ptr = LogServerID;
+	LogServerID->SigEnv.sigev_notify_function = Log_ServerThread;
+	LogServerID->SigEnv.sigev_notify_attributes = NULL;
+
+	Register_logThread(&LogMqServer);
+	return 0;
+}
+int Register_logThread(LOG_SERVER *LogServerID)
+{
+	if(mq_notify(LogServerID->LogMqd,&(LogServerID->SigEnv)) == -1)
+	{
+		fprintf(stderr, "mq_notify error File:%s:%d %s", __FILE__, __LINE__,strerror(errno));
+		exit(-1);
+	}
+	return 0;
+}
+
+void Log_ServerThread(union sigval LogServerID)
+{
+	char buf[8192];
+	unsigned  prio;
+	int fd;
+	Register_logThread(((LOG_SERVER *)(LogServerID.sival_ptr)));
+	//相关处理
+	if(mq_receive(((LOG_SERVER *)(LogServerID.sival_ptr))->LogMqd,buf,((LOG_SERVER *)(LogServerID.sival_ptr))->MqAttr.mq_msgsize,&prio)==(mqd_t)-1)
+	{
+		fprintf(stderr, "mq_receive error File:%s:%d %s", __FILE__, __LINE__,strerror(errno));
+		exit(-1);
+	}
+	fd=open(((LOG_SERVER *)(LogServerID.sival_ptr))->LogFileDir ,O_WRONLY|O_APPEND|O_CREAT,755);
 	if(fd==-1)
 	{
-		return -1;
+		return;
 	}
 	write(fd,buf,strlen(buf));
 	#ifdef DEBUG
 		fprintf(stdout,"%s",buf);
+		fflush(stdout);
 	#endif
-	va_end(ap);
 	close(fd);
-	free(buf);
-	return 0;
+	return;
 }
-
 
 int main(void)
 {
@@ -836,26 +898,28 @@ int main(void)
 	socklen_t client_name_len = sizeof(client_name);
 	pthread_t newthread;
 	
+	Startup_LogServer(&LogMqServer);
+	
 	server_sock = Startup(&port);
-	WriteLogtoFile(0,"INF httpd running on port %d\n", port);
+	WriteLogtoFile(&LogMqServer,0,"INF httpd running on port %d\n", port);
 
 	while (1)
 	{
 		client_sock = accept(server_sock,(struct sockaddr *)&client_name,&client_name_len);
 		if (client_sock == -1)
 		{
-			WriteLogtoFile(error,"SYS accept_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
+			WriteLogtoFile(&LogMqServer,errno,"SYS accept_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 			continue;
 		}
 		ConnectionNum++;
 		if (pthread_create(&newthread , NULL, Deal_Request, (void *)&client_sock) != 0)
 		{
 			ConnectionNum--;
-			WriteLogtoFile(error,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(error));
+			WriteLogtoFile(&LogMqServer,errno,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 		}
 	}
 	
-	WriteLogtoFile(1,"INF httpd server stop!\n");
+	WriteLogtoFile(&LogMqServer,1,"INF httpd server stop!\n");
 	
 	close(server_sock);
 
