@@ -15,6 +15,8 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <mqueue.h>
+#include <signal.h>
+
 
 #define DEBUG
 
@@ -217,7 +219,7 @@ void *Deal_Request(void *psocket)
 		return (NULL);
 	}
 	
-	WriteLogtoFile(&LogMqServer,9,"client Request method:%s URL:%s File path:%s QueryStr:%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.QueryStr);
+	WriteLogtoFile(&LogMqServer,9,"Method:%s URL:%s Path:%s QueryStr:%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.QueryStr);
  	close(client);
 	ConnectionNum--;
 	return ((void*)(NULL));
@@ -792,7 +794,7 @@ int WriteLogtoFile(LOG_SERVER *LogServerID,int err,const char *fmt,...)
 	timer=time(NULL);
 	ptime=localtime(&timer);                //转换为本地时间
 
-    sprintf(buf,"%d-%2d-%2d %2d:%2d:%2d INFOR_ID[%3d]:",(1900+ptime->tm_year),ptime->tm_mon+1,ptime->tm_mday,ptime->tm_hour,ptime->tm_min,ptime->tm_sec,err);
+    sprintf(buf,"%d-%02d-%02d %02d:%02d:%02d INFOR_ID[%03d]:",(1900+ptime->tm_year),ptime->tm_mon+1,ptime->tm_mday,ptime->tm_hour,ptime->tm_min,ptime->tm_sec,err);
 
 	vsnprintf(buf+strlen(buf),(MAXBUFSIZE-strlen(buf)-1),fmt,ap);
 	strcat(buf,"\0");
@@ -806,15 +808,50 @@ int WriteLogtoFile(LOG_SERVER *LogServerID,int err,const char *fmt,...)
 	return 0;
 }
 
-
-int main(void)
+void QuitSignal(int sig)
 {
+	(void)sig;
+	mq_unlink(LogMqServer.MqDir);
+	printf("HttpServer Service to stop\n");
+	exit(-1);
+}
+
+int main(int argc,char *argv[])
+{
+	int ch; 
+	opterr = 0;
+
 	int server_sock = -1;
 	u_short port = 8855;
 	int client_sock = -1;
 	struct sockaddr_in client_name;
 	socklen_t client_name_len = sizeof(client_name);
 	pthread_t newthread;
+
+	while ((ch = getopt(argc,argv,"p:"))!=-1)
+	{  
+		switch(ch)  
+		{  
+			case 'p':
+				port=atoi(optarg);  
+				break;   
+			default: 
+				if(optopt=='p')
+				{
+					printf("Usage %s -p <port>\n",argv[0]);
+				}else
+				{
+					printf("Unknown option %c\n",optopt);
+				}
+				exit(-1);
+		}
+	} 
+	
+	if(signal(SIGINT,QuitSignal)==SIG_ERR)
+	{
+		fprintf(stdout, "signal error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		exit(-1);
+	}
 	
 	Startup_LogServer(&LogMqServer);
 	
