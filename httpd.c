@@ -16,7 +16,8 @@
 #include <stdarg.h>
 #include <mqueue.h>
 #include <signal.h>
-
+#include <sys/ipc.h>
+#include <sys/sem.h>
 
 #define DEBUG
 
@@ -86,23 +87,39 @@ typedef struct
 
 LOG_SERVER LogMqServer={.LogFileDir="./log.txt",.MqDir="/LogServerMq"};
 
-extern int errno;
-int ConnectionNum=0;
+union semun {
+	int 			 val;	 /* Value for SETVAL */
+	struct semid_ds *buf;	 /* Buffer for IPC_STAT, IPC_SET */
+	unsigned short	*array;  /* Array for GETALL, SETALL */
+	struct seminfo	*__buf;  /* Buffer for IPC_INFO
+								(Linux-specific) */
+};
 
+typedef struct
+{
+	const int MaxContion; 
+	int SemID;
+	struct  sembuf Opt;
+	union semun Arg;
+}LOAD_TYPE; 
+
+LOAD_TYPE LoadCtrl={.MaxContion=20};
+
+extern int errno;
 
 int Startup(u_short *);
 
 void *Deal_Request(void *psocket);
 
-int LoadControl(int client,RESPONSE_MSG *request);
-int AccessChecking(int client,RESPONSE_MSG *request);
-int ParseRequest(int client,RESPONSE_MSG *request);
+int LoadControl(int client,RESPONSE_MSG *request,LOAD_TYPE *load);
+int AccessChecking(RESPONSE_MSG *request);
+int ParseRequest(RESPONSE_MSG *request);
 int CheckRequest(RESPONSE_MSG *request);
 int ResponseClient(RESPONSE_MSG *request);
 
 int Execute_CGI(RESPONSE_MSG *request);
 
-int ResponseStaticFiles(RESPONSE_MSG *request,const char *path);
+int ResponseStaticFiles(RESPONSE_MSG *request);
 int ResponseError(RESPONSE_MSG *request);
 
 int Send_ResponseLineToClient(int client,int statusCode,const char *des);
@@ -117,6 +134,11 @@ int Get_ImageFileType(RESPONSE_MSG *request);
 const char *Get_ErrorDes(int StatusCode);	//根据错误码返回http响应行描述信息，如果列表找不到返回第一条记录
 const char *Get_ErrorFileFd(int StatusCode);//根据错误码返回错误页路径，如果列表找不到返回第一条记录
 
+
+int StartLoadSever(LOAD_TYPE *load);
+int Get_ConnectionNum(LOAD_TYPE *load);
+int ConnectionDel(LOAD_TYPE *load);
+int ConnectionGet(LOAD_TYPE *load);
 
 int Startup_LogServer(LOG_SERVER *LogServerID);
 int Register_logThread(LOG_SERVER *LogServerID);
@@ -187,48 +209,47 @@ void *Deal_Request(void *psocket)
 	int client=*((int *)psocket);
 	RESPONSE_MSG msg_client;
 	memset(&msg_client,0,sizeof(msg_client));
-	/*if(LoadControl(client,&msg_client)!=0)
+	if(LoadControl(client,&msg_client,&LoadCtrl)!=0)
 	{
 		close(client);
-		ConnectionNum--;
-		return (NULL);
-	}*/
-
-	if(AccessChecking(client,&msg_client)!=0)
-	{
-		//close(client);
-		ConnectionNum--;
+		ConnectionDel(&LoadCtrl);
 		return (NULL);
 	}
-	if(ParseRequest(client,&msg_client)!=0)
+
+	if(AccessChecking(&msg_client)!=0)
+	{
+		//close(client);
+		ConnectionDel(&LoadCtrl);
+		return (NULL);
+	}
+	if(ParseRequest(&msg_client)!=0)
 	{
 		close(client);
-		ConnectionNum--;
+		ConnectionDel(&LoadCtrl);
 		return (NULL);
 	}
 	if(CheckRequest(&msg_client)!=0)
 	{
 		close(client);
-		ConnectionNum--;
+		ConnectionDel(&LoadCtrl);
 		return (NULL);	
 	}
 	if(ResponseClient(&msg_client)!=0)
 	{
 		close(client);
-		ConnectionNum--;
+		ConnectionDel(&LoadCtrl);
 		return (NULL);
 	}
-	
 	WriteLogtoFile(&LogMqServer,9,"Method:%s URL:%s Path:%s QueryStr:%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.QueryStr);
  	close(client);
-	ConnectionNum--;
+	ConnectionDel(&LoadCtrl);
 	return ((void*)(NULL));
 }
 
-int LoadControl(int client,RESPONSE_MSG *request)
+int LoadControl(int client,RESPONSE_MSG *request,LOAD_TYPE *load)
 {
-	(void)client;
-	if(ConnectionNum>ALLOW_MAX_CONNECTION)
+	request->ClientSocket=client;
+	if(Get_ConnectionNum(load)<=0)
 	{
 		request->ErrorCode=-1;
 		request->StaticMsg.StatusCode=503;//The file is not found
@@ -240,15 +261,13 @@ int LoadControl(int client,RESPONSE_MSG *request)
 	}
 }
 
-int AccessChecking(int client,RESPONSE_MSG *request)
+int AccessChecking(RESPONSE_MSG *request)
 {
-	(void)client;
 	(void)request;
 #ifdef ACCESS_CHECKING_ENABLE
 	struct sockaddr_in peeraddr;
 	socklen_t namelen = sizeof(peeraddr);
-	request->ClientSocket=client;
-	if (getpeername(client,(struct sockaddr *)&peeraddr, &namelen) != -1)
+	if (getpeername(request->ClientSocket,(struct sockaddr *)&peeraddr, &namelen) != -1)
 	{
 		sprintf(request->ClientIP,"%s",(char *)inet_ntoa(peeraddr.sin_addr));
 		WriteLogtoFile(&LogMqServer,2,"INF Client IP:%s\n",request->ClientIP);
@@ -271,7 +290,7 @@ int AccessChecking(int client,RESPONSE_MSG *request)
 #endif
 }
 
-int ParseRequest(int client,RESPONSE_MSG *request)
+int ParseRequest(RESPONSE_MSG *request)
 {
 	/*
 	分析请求，解析出来请求方法，路径地址相对于htdocs目录，协议版本
@@ -284,7 +303,6 @@ int ParseRequest(int client,RESPONSE_MSG *request)
 	{
 		return -1;
 	}
-	request->ClientSocket=client;
 	numchars=Get_Line(request->ClientSocket,buf,MAXBUFSIZE);
 	i = 0; j = 0;
 	while (!ISspace(buf[j]) && (i < sizeof(request->Method) - 1))
@@ -340,7 +358,7 @@ int ParseRequest(int client,RESPONSE_MSG *request)
 
 	while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
 	{
-		numchars = Get_Line(client, buf, sizeof(buf));
+		numchars = Get_Line(request->ClientSocket, buf, sizeof(buf));
 	}
 	return 0;
 }
@@ -386,13 +404,12 @@ int ResponseClient(RESPONSE_MSG *request)
 	{
 		if(ISCGI_FILE(request->ParseState))//CGI FILE
 		{
-			printf("niahsdoaf \n");
 			Execute_CGI(request);
 
 		}else//TEXT FILE
 		{
 			request->StaticMsg.StatusCode=200;
-			ResponseStaticFiles(request,request->Path); 
+			ResponseStaticFiles(request); 
 		}
 	}else
 	{
@@ -506,7 +523,7 @@ int Execute_CGI(RESPONSE_MSG *request)
 }
 
 
-int ResponseStaticFiles(RESPONSE_MSG *request,const char *path) 
+int ResponseStaticFiles(RESPONSE_MSG *request) 
 {
 	char buf[MAXBUFSIZE];
 	int StatusCode=request->StaticMsg.StatusCode;
@@ -516,7 +533,7 @@ int ResponseStaticFiles(RESPONSE_MSG *request,const char *path)
 	Send_ResponseHeadToClient(request->ClientSocket,"Content-Length",buf);
 	Send_ResponseHeadToClient(request->ClientSocket,"Connection","close");
 	Send_ResponseBlankLineToClient(request->ClientSocket);
-	Send_ResponseBodyToClient(request->ClientSocket,path);
+	Send_ResponseBodyToClient(request->ClientSocket,request->Path);
 	return 0;
 }
 
@@ -715,6 +732,74 @@ const char *Get_ErrorFileFd(int StatusCode)
 	return ReqError[0].ErrorFile;
 }
 
+int StartLoadSever(LOAD_TYPE *load)
+{
+	int ret;
+	load->Arg.val=load->MaxContion;
+
+	load->SemID = semget(6732,1,IPC_CREAT | IPC_EXCL | 0666);
+	if(load->SemID ==-1)
+	{
+		WriteLogtoFile(&LogMqServer,errno,"SYS semget error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+		WriteLogtoFile(&LogMqServer,0,"INF The server to start to fail!\n");
+		exit(-1);
+	}
+	ret=semctl(load->SemID,0,SETVAL,load->Arg);
+	if(ret ==-1)
+	{
+		WriteLogtoFile(&LogMqServer,errno,"SYS semctl error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+		WriteLogtoFile(&LogMqServer,0,"INF The server to start to fail!\n");
+		exit(-1);
+	}
+	return 0;
+}
+
+int Get_ConnectionNum(LOAD_TYPE *load)
+{
+	int val;
+	val=semctl(load->SemID,0,GETVAL,0);
+	if(val==-1)
+	{
+		WriteLogtoFile(&LogMqServer,errno,"SYS semctl error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+		exit(-1);
+	}
+	printf("Load %d\n",(load->MaxContion)-val);
+	fflush(stdout);
+	return val;
+}
+
+int ConnectionDel(LOAD_TYPE *load)
+{
+	int ret;
+	load->Opt.sem_num=0;
+	load->Opt.sem_op=1;
+	load->Opt.sem_flg=0;
+	ret=semop(load->SemID,&(load->Opt),1);
+	if(ret==-1)
+	{
+		WriteLogtoFile(&LogMqServer,errno,"SYS semop error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+		exit(-1);
+	}
+	return 0;
+}
+
+int ConnectionGet(LOAD_TYPE *load)
+{
+	int ret;
+	load->Opt.sem_num=0;
+	load->Opt.sem_op=-1;
+	load->Opt.sem_flg=0;
+
+	ret=semop(load->SemID,&(load->Opt),1);
+	if(ret==-1)
+	{
+		WriteLogtoFile(&LogMqServer,errno,"SYS semop error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+		exit(-1);
+	}
+
+	return 0;
+}
+
 int Startup_LogServer(LOG_SERVER *LogServerID)
 {
 	//mq_unlink(LogServerID->MqDir);
@@ -812,6 +897,7 @@ void QuitSignal(int sig)
 {
 	(void)sig;
 	mq_unlink(LogMqServer.MqDir);
+	semctl(LoadCtrl.SemID,0,IPC_RMID,0);
 	printf("HttpServer Service to stop\n");
 	exit(-1);
 }
@@ -855,25 +941,28 @@ int main(int argc,char *argv[])
 	
 	Startup_LogServer(&LogMqServer);
 	
+	StartLoadSever(&LoadCtrl);
+	
 	server_sock = Startup(&port);
 	WriteLogtoFile(&LogMqServer,0,"INF httpd running on port %d\n", port);
 
 	while (1)
 	{
 		client_sock = accept(server_sock,(struct sockaddr *)&client_name,&client_name_len);
+
 		if (client_sock == -1)
 		{
 			WriteLogtoFile(&LogMqServer,errno,"SYS accept_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 			continue;
 		}
-		ConnectionNum++;
+
+		ConnectionGet(&LoadCtrl);
+
 		if (pthread_create(&newthread , NULL, Deal_Request, (void *)&client_sock) != 0)
 		{
-			ConnectionNum--;
+			ConnectionDel(&LoadCtrl);
 			WriteLogtoFile(&LogMqServer,errno,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 		}
-		printf("####%d####\n",ConnectionNum);
-		fflush(stdout);
 	}
 	
 	WriteLogtoFile(&LogMqServer,1,"INF httpd server stop!\n");
