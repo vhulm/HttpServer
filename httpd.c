@@ -1,30 +1,3 @@
-/* J. David's webserver */
-/* This is a simple webserver.
- * Created November 1999 by J. David Blackstone.
- * CSE 4344 (Network concepts), Prof. Zeigler
- * University of Texas at Arlington
- */
-/* This program compiles for Sparc Solaris 2.6.
- * To compile for Linux:
- *  1) Comment out the #include <pthread.h> line.
- *  2) Comment out the line that defines the variable newthread.
- *  3) Comment out the two lines that run pthread_create().
- *  4) Uncomment the line that runs accept_request().
- *  5) Remove -lsocket from the Makefile.
- */
- /*
- 在Deal_Request函数中的
-int LoadControl(int client,RESPONSE_MSG *request);
-int AccessChecking(int client,RESPONSE_MSG *request);
-int ParseRequest(int client,RESPONSE_MSG *request);
-int CheckRequest(RESPONSE_MSG *request);
-int ResponseClient(RESPONSE_MSG *request);
-如果没用错误发生则返回0，如果有不致命错误发生
-设置RESPONSE_MSG中的错误码，同时返回0
-如果发生致命错误设置错误码，同时返回非0值
- Deal_Request中检查到非0值返回简单处理后终止线程
-
- */
 #include <stdio.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -43,24 +16,12 @@ int ResponseClient(RESPONSE_MSG *request);
 #include <stdarg.h>
 #include <mqueue.h>
 
-
-//printf("%s\n%s\n%s\n%s\n",request->Method,request->URL,request->Path,request->Query);
-//while(1);
-extern int errno;
-
 #define DEBUG
 
 #define MAXBUFSIZE	(4096)
 
-#define SERVER_STRING	"Server: HttpServer/0.1.0\r\n"
-
 //#define ACCESS_CHECKING_ENABLE
 #define ALLOW_MAX_CONNECTION (20)
-
-#define RESPONSE_NO_ERROR(STATUS) ((STATUS)!=(-1))
-#define CGI_FILE (1)
-#define ISCGI_FILE(type)  ((type)!=(0))
-#define ISspace(x)	(isspace((int)(x)))
 
 typedef struct
 {
@@ -78,55 +39,22 @@ typedef struct
 
 typedef struct
 {
-	int client;
-	char ClientIP[22];
 	int ParseState;
 	int ErrorCode;
+	int ClientSocket;
+	char ClientIP[22];
 	char Method[10];
 	char URL[1024];
 	char Path[1024];
-	char *Query;
+	char *QueryStr;
 	RESPONSE_STATIC_MSG StaticMsg;
 	RESPONSE_CGI_MSG CgiMsg;
 }RESPONSE_MSG;
 
-
-
-int ConnectionNum=0;
-
-void accept_request(int);
-void bad_request(int);
-void cat(int, FILE *);
-void cannot_execute(int);
-void error_die(const char *);
-void execute_cgi(int, const char *, const char *, const char *);
-int get_line(int, char *, int);
-
-void *Log_Server(void *logFileDir);
-
-int Startup(u_short *);
-
-void *Deal_Request(void *psocket);
-
-int LoadControl(int client,RESPONSE_MSG *request);
-int AccessChecking(int client,RESPONSE_MSG *request);
-int ParseRequest(int client,RESPONSE_MSG *request);
-int CheckRequest(RESPONSE_MSG *request);
-int ResponseClient(RESPONSE_MSG *request);
-
-int ResponseStaticFiles(RESPONSE_MSG *request,const char *path);
-int ResponseError(RESPONSE_MSG *request);
-
-int Send_ResponseLineToClient(int client,int statusCode,const char *des);
-int Send_ResponseHeadToClient(int client,const char *headName,const char *value);
-int Send_ResponseBlankLineToClient(int client);
-int Send_ResponseBodyToClient(int client,const char *path);
-
-
-int IPMatch(const char *ClientIP);
-int Get_ImageFileType(RESPONSE_MSG *request);
-const char *Get_ErrorDes(int StatusCode);	//根据错误码返回http响应行描述信息，如果列表找不到返回第一条记录
-const char *Get_ErrorFileFd(int StatusCode);//根据错误码返回错误页路径，如果列表找不到返回第一条记录
+#define RESPONSE_NO_ERROR(STATUS) ((STATUS)!=(-1))
+#define CGI_FILE (1)
+#define ISCGI_FILE(type)  ((type)!=(0))
+#define ISspace(x)	(isspace((int)(x)))
 
 
 typedef struct
@@ -138,15 +66,12 @@ typedef struct
 
 const ERROR_MSG ReqError[]={{001,"des 001","htdocs/001.html"},
 							{200,"OK!",NULL},
+							{400,"BAD REQUEST","htdocs/400.html"},
 							{404,"This web page not found!","htdocs/404.html"},
-							{500,"des 500","htdocs/500.html"},
+							{500,"Internal Server Error","htdocs/500.html"},
 							{503,"des 503","htdocs/503.html"},
 															};
 #define MAX_ERROR_LIST_NUM	((sizeof(ReqError))/(sizeof(ERROR_MSG)))
-
-
-#define LOGFILE_DIR	"./log.txt"
-#define LOG_SERVER_MQ_DIR "/LogServerMq"
 
 typedef struct
 {
@@ -157,221 +82,45 @@ typedef struct
 	struct sigevent SigEnv;
 }LOG_SERVER;
 
-LOG_SERVER LogMqServer={.LogFileDir=LOGFILE_DIR,.MqDir=LOG_SERVER_MQ_DIR};
+LOG_SERVER LogMqServer={.LogFileDir="./log.txt",.MqDir="/LogServerMq"};
 
-int WriteLogtoFile(LOG_SERVER *LogServerID,int err,const char *fmt,...);
+extern int errno;
+int ConnectionNum=0;
+
+
+int Startup(u_short *);
+
+void *Deal_Request(void *psocket);
+
+int LoadControl(int client,RESPONSE_MSG *request);
+int AccessChecking(int client,RESPONSE_MSG *request);
+int ParseRequest(int client,RESPONSE_MSG *request);
+int CheckRequest(RESPONSE_MSG *request);
+int ResponseClient(RESPONSE_MSG *request);
+
+int Execute_CGI(RESPONSE_MSG *request);
+
+int ResponseStaticFiles(RESPONSE_MSG *request,const char *path);
+int ResponseError(RESPONSE_MSG *request);
+
+int Send_ResponseLineToClient(int client,int statusCode,const char *des);
+int Send_ResponseHeadToClient(int client,const char *headName,const char *value);
+int Send_ResponseBlankLineToClient(int client);
+int Send_ResponseBodyToClient(int client,const char *path);
+
+int Get_Line(int, char *, int);
+
+int IPMatch(const char *ClientIP);
+int Get_ImageFileType(RESPONSE_MSG *request);
+const char *Get_ErrorDes(int StatusCode);	//根据错误码返回http响应行描述信息，如果列表找不到返回第一条记录
+const char *Get_ErrorFileFd(int StatusCode);//根据错误码返回错误页路径，如果列表找不到返回第一条记录
+
 
 int Startup_LogServer(LOG_SERVER *LogServerID);
 int Register_logThread(LOG_SERVER *LogServerID);
 void Log_ServerThread(union sigval LogServerID);
 
-
-/**********************************************************************/
-/* Inform the client that a request it has made has a problem.
- * Parameters: client socket */
-/**********************************************************************/
-void bad_request(int client)
-{
- char buf[1024];
-
- sprintf(buf, "HTTP/1.0 400 BAD REQUEST\r\n");
- send(client, buf, sizeof(buf), 0);
- sprintf(buf, "Content-type: text/html\r\n");
- send(client, buf, sizeof(buf), 0);
- sprintf(buf, "\r\n");
- send(client, buf, sizeof(buf), 0);
- sprintf(buf, "<P>Your browser sent a bad request, ");
- send(client, buf, sizeof(buf), 0);
- sprintf(buf, "such as a POST without a Content-Length.\r\n");
- send(client, buf, sizeof(buf), 0);
-}
-
-/**********************************************************************/
-/* Put the entire contents of a file out on a socket.  This function
- * is named after the UNIX "cat" command, because it might have been
- * easier just to do something like pipe, fork, and exec("cat").
- * Parameters: the client socket descriptor
- *             FILE pointer for the file to cat */
-/**********************************************************************/
-void cat(int client, FILE *resource)
-{
- char buf[1024];
-
- fgets(buf, sizeof(buf), resource);
- while (!feof(resource))
- {
-  send(client, buf, strlen(buf), 0);
-  fgets(buf, sizeof(buf), resource);
- }
-}
-
-/**********************************************************************/
-/* Inform the client that a CGI script could not be executed.
- * Parameter: the client socket descriptor. */
-/**********************************************************************/
-void cannot_execute(int client)
-{
- char buf[1024];
-
- sprintf(buf, "HTTP/1.0 500 Internal Server Error\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "Content-type: text/html\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "\r\n");
- send(client, buf, strlen(buf), 0);
- sprintf(buf, "<P>Error prohibited CGI execution.\r\n");
- send(client, buf, strlen(buf), 0);
-}
-
-/**********************************************************************/
-/* Print out an error message with perror() (for system errors; based
- * on value of errno, which indicates system call errors) and exit the
- * program indicating an error. */
-/**********************************************************************/
-void error_die(const char *sc)
-{
- perror(sc);
- exit(1);
-}
-
-/**********************************************************************/
-/* Execute a CGI script.  Will need to set environment variables as
- * appropriate.
- * Parameters: client socket descriptor
- *             path to the CGI script */
-/**********************************************************************/
-void execute_cgi(int client, const char *path,
-                 const char *method, const char *query_string)
-{
- char buf[1024];
- int cgi_output[2];
- int cgi_input[2];
- pid_t pid;
- int status;
- int i;
- char c;
- int numchars = 1;
- int content_length = -1;
-
- buf[0] = 'A'; buf[1] = '\0';
- if (strcasecmp(method, "GET") == 0)
-  while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
-   numchars = get_line(client, buf, sizeof(buf));
- else    /* POST */
- {
-  numchars = get_line(client, buf, sizeof(buf));
-  while ((numchars > 0) && strcmp("\n", buf))
-  {
-   buf[15] = '\0';
-   if (strcasecmp(buf, "Content-Length:") == 0)
-    content_length = atoi(&(buf[16]));
-   numchars = get_line(client, buf, sizeof(buf));
-  }
-  if (content_length == -1) {
-   bad_request(client);
-   return;
-  }
- }
-
- sprintf(buf, "HTTP/1.0 200 OK\r\n");
- send(client, buf, strlen(buf), 0);
-
- if (pipe(cgi_output) < 0) {
-  cannot_execute(client);
-  return;
- }
- if (pipe(cgi_input) < 0) {
-  cannot_execute(client);
-  return;
- }
-
- if ( (pid = fork()) < 0 ) {
-  cannot_execute(client);
-  return;
- }
- if (pid == 0)  /* child: CGI script */
- {
-  char meth_env[255];
-  char query_env[255];
-  char length_env[255];
-
-  dup2(cgi_output[1], 1);
-  dup2(cgi_input[0], 0);
-  close(cgi_output[0]);
-  close(cgi_input[1]);
-  sprintf(meth_env, "REQUEST_METHOD=%s", method);
-  putenv(meth_env);
-  if (strcasecmp(method, "GET") == 0) {
-   sprintf(query_env, "QUERY_STRING=%s", query_string);
-   putenv(query_env);
-  }
-  else {   /* POST */
-   sprintf(length_env, "CONTENT_LENGTH=%d", content_length);
-   putenv(length_env);
-  }
-  execl(path, path, NULL);
-  exit(0);
- } else {    /* parent */
-  close(cgi_output[1]);
-  close(cgi_input[0]);
-  if (strcasecmp(method, "POST") == 0)
-   for (i = 0; i < content_length; i++) {
-    recv(client, &c, 1, 0);
-    write(cgi_input[1], &c, 1);
-   }
-  while (read(cgi_output[0], &c, 1) > 0)
-   send(client, &c, 1, 0);
-
-  close(cgi_output[0]);
-  close(cgi_input[1]);
-  waitpid(pid, &status, 0);
- }
-}
-
-/**********************************************************************/
-/* Get a line from a socket, whether the line ends in a newline,
- * carriage return, or a CRLF combination.  Terminates the string read
- * with a null character.  If no newline indicator is found before the
- * end of the buffer, the string is terminated with a null.  If any of
- * the above three line terminators is read, the last character of the
- * string will be a linefeed and the string will be terminated with a
- * null character.
- * Parameters: the socket descriptor
- *             the buffer to save the data in
- *             the size of the buffer
- * Returns: the number of bytes stored (excluding null) */
-/**********************************************************************/
-int get_line(int sock, char *buf, int size)
-{
- int i = 0;
- char c = '\0';
- int n;
-
- while ((i < size - 1) && (c != '\n'))
- {
-  n = recv(sock, &c, 1, 0);
-  /* DEBUG printf("%02X\n", c); */
-  if (n > 0)
-  {
-   if (c == '\r')
-   {
-    n = recv(sock, &c, 1, MSG_PEEK);
-    /* DEBUG printf("%02X\n", c); */
-    if ((n > 0) && (c == '\n'))
-     recv(sock, &c, 1, 0);
-    else
-     c = '\n';
-   }
-   buf[i] = c;
-   i++;
-  }
-  else
-   c = '\n';
- }
- buf[i] = '\0';
- 
- return(i);
-}
+int WriteLogtoFile(LOG_SERVER *LogServerID,int err,const char *fmt,...);
 
 /**********************************************************************/
 /* This function starts the process of listening for web connections
@@ -388,7 +137,11 @@ int Startup(u_short *port)
 
 	httpd = socket(PF_INET, SOCK_STREAM, 0);
 	if (httpd == -1)
-	error_die("socket");
+	{
+		WriteLogtoFile(&LogMqServer,errno,"SYS socket error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+		WriteLogtoFile(&LogMqServer,0,"INF The server to start to fail!\n");
+		exit(-6);
+	}
 	memset(&name, 0, sizeof(name));
 	name.sin_family = AF_INET;
 	name.sin_port = htons(*port);
@@ -427,18 +180,18 @@ int Startup(u_short *port)
 	return(httpd);
 }
 
-/**********************************************************************/
 void *Deal_Request(void *psocket)
 {
 	int client=*((int *)psocket);
 	RESPONSE_MSG msg_client;
 	memset(&msg_client,0,sizeof(msg_client));
-	if(LoadControl(client,&msg_client)!=0)
+	/*if(LoadControl(client,&msg_client)!=0)
 	{
 		close(client);
 		ConnectionNum--;
 		return (NULL);
-	}
+	}*/
+
 	if(AccessChecking(client,&msg_client)!=0)
 	{
 		//close(client);
@@ -463,10 +216,26 @@ void *Deal_Request(void *psocket)
 		ConnectionNum--;
 		return (NULL);
 	}
-	WriteLogtoFile(&LogMqServer,9,"client Request method:%s URL:%s File path:%s Query:%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.Query);
+	
+	WriteLogtoFile(&LogMqServer,9,"client Request method:%s URL:%s File path:%s QueryStr:%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.QueryStr);
  	close(client);
 	ConnectionNum--;
 	return ((void*)(NULL));
+}
+
+int LoadControl(int client,RESPONSE_MSG *request)
+{
+	(void)client;
+	if(ConnectionNum>ALLOW_MAX_CONNECTION)
+	{
+		request->ErrorCode=-1;
+		request->StaticMsg.StatusCode=503;//The file is not found
+		ResponseError(request); 
+		return -1;
+	}else
+	{
+		return 0;
+	}
 }
 
 int AccessChecking(int client,RESPONSE_MSG *request)
@@ -476,7 +245,7 @@ int AccessChecking(int client,RESPONSE_MSG *request)
 #ifdef ACCESS_CHECKING_ENABLE
 	struct sockaddr_in peeraddr;
 	socklen_t namelen = sizeof(peeraddr);
-	request->client=client;
+	request->ClientSocket=client;
 	if (getpeername(client,(struct sockaddr *)&peeraddr, &namelen) != -1)
 	{
 		sprintf(request->ClientIP,"%s",(char *)inet_ntoa(peeraddr.sin_addr));
@@ -500,27 +269,6 @@ int AccessChecking(int client,RESPONSE_MSG *request)
 #endif
 }
 
-int IPMatch(const char *ClientIP)
-{
-	(void)ClientIP;
-	return 0;
-}
-	
-int LoadControl(int client,RESPONSE_MSG *request)
-{
-	(void)client;
-	if(ConnectionNum>ALLOW_MAX_CONNECTION)
-	{
-		request->ErrorCode=-1;
-		request->StaticMsg.StatusCode=503;//The file is not found
-		ResponseError(request); 
-		return -1;
-	}else
-	{
-		return 0;
-	}
-}
-
 int ParseRequest(int client,RESPONSE_MSG *request)
 {
 	/*
@@ -534,8 +282,8 @@ int ParseRequest(int client,RESPONSE_MSG *request)
 	{
 		return -1;
 	}
-	request->client=client;
-	numchars=get_line(request->client,buf,MAXBUFSIZE);
+	request->ClientSocket=client;
+	numchars=Get_Line(request->ClientSocket,buf,MAXBUFSIZE);
 	i = 0; j = 0;
 	while (!ISspace(buf[j]) && (i < sizeof(request->Method) - 1))
 	{
@@ -569,17 +317,17 @@ int ParseRequest(int client,RESPONSE_MSG *request)
 
 	if (strcasecmp(request->Method, "GET") == 0)
 	{
-		request->Query= request->URL;
-		while ((*(request->Query) != '?') && (*(request->Query) != '\0'))
+		request->QueryStr= request->URL;
+		while ((*(request->QueryStr) != '?') && (*(request->QueryStr) != '\0'))
 		{
-			(request->Query)++;
+			(request->QueryStr)++;
 		}
 
-		if (*(request->Query) == '?')
+		if (*(request->QueryStr) == '?')
 		{
 			request->ParseState= CGI_FILE;
-			*(request->Query) = '\0';
-			(request->Query)++;
+			*(request->QueryStr) = '\0';
+			(request->QueryStr)++;
 		}
 	}
 	sprintf(request->Path, "htdocs%s", request->URL);
@@ -590,7 +338,7 @@ int ParseRequest(int client,RESPONSE_MSG *request)
 
 	while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
 	{
-		numchars = get_line(client, buf, sizeof(buf));
+		numchars = Get_Line(client, buf, sizeof(buf));
 	}
 	return 0;
 }
@@ -636,7 +384,9 @@ int ResponseClient(RESPONSE_MSG *request)
 	{
 		if(ISCGI_FILE(request->ParseState))//CGI FILE
 		{
-			execute_cgi(request->client,request->Path,request->Method,request->Query);
+			printf("niahsdoaf \n");
+			Execute_CGI(request);
+
 		}else//TEXT FILE
 		{
 			request->StaticMsg.StatusCode=200;
@@ -648,18 +398,123 @@ int ResponseClient(RESPONSE_MSG *request)
 	}
 	return 0;
 }
+
+/**********************************************************************/
+/* Execute a CGI script.  Will need to set environment variables as
+ * appropriate.
+ * Parameters: client socket descriptor
+ *             path to the CGI script */
+/**********************************************************************/
+int Execute_CGI(RESPONSE_MSG *request)
+{
+ char buf[1024];
+ int cgi_output[2];
+ int cgi_input[2];
+ pid_t pid;
+ int status;
+ int i;
+ char c;
+ int numchars = 1;
+ int content_length = -1;
+
+ buf[0] = 'A'; buf[1] = '\0';
+ if (strcasecmp(request->Method, "GET") == 0)
+  while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
+   numchars = Get_Line(request->ClientSocket, buf, sizeof(buf));
+ else    /* POST */
+ {
+  numchars = Get_Line(request->ClientSocket, buf, sizeof(buf));
+  while ((numchars > 0) && strcmp("\n", buf))
+  {
+   buf[15] = '\0';
+   if (strcasecmp(buf, "Content-Length:") == 0)
+    content_length = atoi(&(buf[16]));
+   numchars = Get_Line(request->ClientSocket, buf, sizeof(buf));
+  }
+  if (content_length == -1) 
+  	{
+  	request->ErrorCode=-1;
+	request->StaticMsg.StatusCode=400;
+	ResponseError(request);
+   return -1;
+  }
+ }
+
+ sprintf(buf, "HTTP/1.0 200 OK\r\n");
+ send(request->ClientSocket, buf, strlen(buf), 0);
+
+ if (pipe(cgi_output) < 0) {
+	  request->ErrorCode=-1;
+	  request->StaticMsg.StatusCode=500;
+	  ResponseError(request);
+	  return -1;
+ }
+ if (pipe(cgi_input) < 0) {
+	  request->ErrorCode=-1;
+	  request->StaticMsg.StatusCode=500;
+	  ResponseError(request);
+	  return -1;
+ }
+
+ if ( (pid = fork()) < 0 ) {
+	  request->ErrorCode=-1;
+	  request->StaticMsg.StatusCode=500;
+	  ResponseError(request);
+	  return -1;
+
+ }
+ if (pid == 0)  /* child: CGI script */
+ {
+  char meth_env[255];
+  char query_env[255];
+  char length_env[255];
+
+  dup2(cgi_output[1], 1);
+  dup2(cgi_input[0], 0);
+  close(cgi_output[0]);
+  close(cgi_input[1]);
+  sprintf(meth_env, "REQUEST_METHOD=%s", request->Method);
+  putenv(meth_env);
+  if (strcasecmp(request->Method, "GET") == 0) {
+   sprintf(query_env, "QUERY_STRING=%s", request->QueryStr);
+   putenv(query_env);
+  }
+  else {   /* POST */
+   sprintf(length_env, "CONTENT_LENGTH=%d", content_length);
+   putenv(length_env);
+  }
+  execl(request->Path, request->Path, NULL);
+  exit(0);
+ } else {    /* parent */
+  close(cgi_output[1]);
+  close(cgi_input[0]);
+  if (strcasecmp(request->Method, "POST") == 0)
+   for (i = 0; i < content_length; i++) {
+    recv(request->ClientSocket, &c, 1, 0);
+    write(cgi_input[1], &c, 1);
+   }
+  while (read(cgi_output[0], &c, 1) > 0)
+   send(request->ClientSocket, &c, 1, 0);
+
+  close(cgi_output[0]);
+  close(cgi_input[1]);
+  waitpid(pid, &status, 0);
+ }
+ return 0;
+}
+
+
 int ResponseStaticFiles(RESPONSE_MSG *request,const char *path) 
 {
 	char buf[MAXBUFSIZE];
 	int StatusCode=request->StaticMsg.StatusCode;
-	Send_ResponseLineToClient(request->client,StatusCode,Get_ErrorDes(StatusCode));
-	Send_ResponseHeadToClient(request->client,"Content-Type",request->StaticMsg.ContentType);
+	Send_ResponseLineToClient(request->ClientSocket,StatusCode,Get_ErrorDes(StatusCode));
+	Send_ResponseHeadToClient(request->ClientSocket,"Content-Type",request->StaticMsg.ContentType);
 	sprintf(buf,"%ld",request->StaticMsg.ContentLength);
-	Send_ResponseHeadToClient(request->client,"Content-Length",buf);
-	Send_ResponseHeadToClient(request->client,"Connection","close");
-	//Send_ResponseHeadToClient(request->client,SERVER_STRING,NULL);
-	Send_ResponseBlankLineToClient(request->client);
-	Send_ResponseBodyToClient(request->client,path);
+	Send_ResponseHeadToClient(request->ClientSocket,"Content-Length",buf);
+	Send_ResponseHeadToClient(request->ClientSocket,"Connection","close");
+	Send_ResponseBlankLineToClient(request->ClientSocket);
+	Send_ResponseBodyToClient(request->ClientSocket,path);
 	return 0;
 }
 
@@ -673,16 +528,15 @@ int ResponseError(RESPONSE_MSG *request)
 	{
 		request->StaticMsg.ContentLength=st.st_size+2;
 	}
-	Send_ResponseLineToClient(request->client,StatusCode,Get_ErrorDes(StatusCode));
+	Send_ResponseLineToClient(request->ClientSocket,StatusCode,Get_ErrorDes(StatusCode));
 	printf("%s\n",Get_ErrorDes(StatusCode));
-	Send_ResponseHeadToClient(request->client,"Content-Type",request->StaticMsg.ContentType);
+	Send_ResponseHeadToClient(request->ClientSocket,"Content-Type",request->StaticMsg.ContentType);
 	sprintf(buf,"%ld",request->StaticMsg.ContentLength);
-	Send_ResponseHeadToClient(request->client,"Content-Length",buf);
-	Send_ResponseHeadToClient(request->client,"Connection","close");
-	Send_ResponseHeadToClient(request->client,SERVER_STRING,NULL);
-	Send_ResponseBlankLineToClient(request->client);
+	Send_ResponseHeadToClient(request->ClientSocket,"Content-Length",buf);
+	Send_ResponseHeadToClient(request->ClientSocket,"Connection","close");
+	Send_ResponseBlankLineToClient(request->ClientSocket);
 	printf("%s\n",Get_ErrorFileFd(StatusCode));
-	Send_ResponseBodyToClient(request->client,Get_ErrorFileFd(StatusCode));
+	Send_ResponseBodyToClient(request->ClientSocket,Get_ErrorFileFd(StatusCode));
 	WriteLogtoFile(&LogMqServer,StatusCode,"PARE ResponseError Eorror %s\n",Get_ErrorDes(StatusCode));
 	return 0;
 }
@@ -741,6 +595,59 @@ int Send_ResponseBodyToClient(int client,const char *path)
 	return 0;
 }
 
+
+
+/**********************************************************************/
+/* Get a line from a socket, whether the line ends in a newline,
+ * carriage return, or a CRLF combination.  Terminates the string read
+ * with a null character.  If no newline indicator is found before the
+ * end of the buffer, the string is terminated with a null.  If any of
+ * the above three line terminators is read, the last character of the
+ * string will be a linefeed and the string will be terminated with a
+ * null character.
+ * Parameters: the socket descriptor
+ *             the buffer to save the data in
+ *             the size of the buffer
+ * Returns: the number of bytes stored (excluding null) */
+/**********************************************************************/
+int Get_Line(int sock, char *buf, int size)
+{
+ int i = 0;
+ char c = '\0';
+ int n;
+
+ while ((i < size - 1) && (c != '\n'))
+ {
+  n = recv(sock, &c, 1, 0);
+  /* DEBUG printf("%02X\n", c); */
+  if (n > 0)
+  {
+   if (c == '\r')
+   {
+    n = recv(sock, &c, 1, MSG_PEEK);
+    /* DEBUG printf("%02X\n", c); */
+    if ((n > 0) && (c == '\n'))
+     recv(sock, &c, 1, 0);
+    else
+     c = '\n';
+   }
+   buf[i] = c;
+   i++;
+  }
+  else
+   c = '\n';
+ }
+ buf[i] = '\0';
+ 
+ return(i);
+}
+
+int IPMatch(const char *ClientIP)
+{
+	(void)ClientIP;
+	return 0;
+}
+	
 int Get_ImageFileType(RESPONSE_MSG *request)
 {
 	int fd;
@@ -806,6 +713,66 @@ const char *Get_ErrorFileFd(int StatusCode)
 	return ReqError[0].ErrorFile;
 }
 
+int Startup_LogServer(LOG_SERVER *LogServerID)
+{
+	//mq_unlink(LogServerID->MqDir);
+	if((LogServerID->LogMqd = mq_open(LogServerID->MqDir,O_CREAT |O_RDWR,0666,NULL))==(mqd_t)-1)
+	{
+		fprintf(stdout, "mq_open error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		exit(-1);
+	}
+	mq_getattr(LogServerID->LogMqd,&(LogServerID->MqAttr));
+
+	LogServerID->SigEnv.sigev_notify = SIGEV_THREAD;
+	LogServerID->SigEnv.sigev_value.sival_ptr = LogServerID;
+	LogServerID->SigEnv.sigev_notify_function = Log_ServerThread;
+	LogServerID->SigEnv.sigev_notify_attributes = NULL;
+
+	Register_logThread(&LogMqServer);
+	return 0;
+}
+int Register_logThread(LOG_SERVER *LogServerID)
+{
+	if(mq_notify(LogServerID->LogMqd,&(LogServerID->SigEnv)) == -1)
+	{
+		fprintf(stdout, "mq_notify error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		exit(-1);
+	}
+	return 0;
+}
+
+void Log_ServerThread(union sigval LogServerID)
+{
+	char buf[8192];
+	unsigned  prio;
+	int fd;
+	int n=0;
+	Register_logThread(((LOG_SERVER *)(LogServerID.sival_ptr)));
+	//相关处理
+	fd=open(((LOG_SERVER *)(LogServerID.sival_ptr))->LogFileDir ,O_WRONLY|O_APPEND|O_CREAT,755);
+	if(fd==-1)
+	{
+		return;
+	}
+
+	do
+	{
+		if((n=mq_receive(((LOG_SERVER *)(LogServerID.sival_ptr))->LogMqd,buf,((LOG_SERVER *)(LogServerID.sival_ptr))->MqAttr.mq_msgsize,&prio))==(mqd_t)-1)
+		{
+			fprintf(stdout, "mq_receive error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+			exit(-1);
+		}
+
+		write(fd,buf,strlen(buf));
+		#ifdef DEBUG
+			fprintf(stdout,"%s",buf);
+			fflush(stdout);
+		#endif
+	}while(n>=0);
+	close(fd);
+	return;
+}
+
 /*
 SYS 服务器自身 系统调用错误错误号为系统error变量
 INF 系统提示信息Error num (0-99)
@@ -830,64 +797,15 @@ int WriteLogtoFile(LOG_SERVER *LogServerID,int err,const char *fmt,...)
 	vsnprintf(buf+strlen(buf),(MAXBUFSIZE-strlen(buf)-1),fmt,ap);
 	strcat(buf,"\0");
 
-	mq_send(LogServerID->LogMqd,(char *)buf,strlen(buf)+1,prio);
+	if(mq_send(LogServerID->LogMqd,(char *)buf,strlen(buf)+1,prio)<0)
+	{
+		fprintf(stdout, "mq_open error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+
+	}
 	va_end(ap);
 	return 0;
 }
 
-int Startup_LogServer(LOG_SERVER *LogServerID)
-{
-	//mq_unlink(LogServerID->MqDir);
-	if((LogServerID->LogMqd = mq_open(LogServerID->MqDir,O_CREAT |O_RDWR | O_NONBLOCK,0666,NULL))==(mqd_t)-1)
-	{
-		fprintf(stderr, "mq_open error File:%s:%d %s", __FILE__, __LINE__,strerror(errno));
-		exit(-1);
-	}
-	mq_getattr(LogServerID->LogMqd,&(LogServerID->MqAttr));
-
-	LogServerID->SigEnv.sigev_notify = SIGEV_THREAD;
-	LogServerID->SigEnv.sigev_value.sival_ptr = LogServerID;
-	LogServerID->SigEnv.sigev_notify_function = Log_ServerThread;
-	LogServerID->SigEnv.sigev_notify_attributes = NULL;
-
-	Register_logThread(&LogMqServer);
-	return 0;
-}
-int Register_logThread(LOG_SERVER *LogServerID)
-{
-	if(mq_notify(LogServerID->LogMqd,&(LogServerID->SigEnv)) == -1)
-	{
-		fprintf(stderr, "mq_notify error File:%s:%d %s", __FILE__, __LINE__,strerror(errno));
-		exit(-1);
-	}
-	return 0;
-}
-
-void Log_ServerThread(union sigval LogServerID)
-{
-	char buf[8192];
-	unsigned  prio;
-	int fd;
-	Register_logThread(((LOG_SERVER *)(LogServerID.sival_ptr)));
-	//相关处理
-	if(mq_receive(((LOG_SERVER *)(LogServerID.sival_ptr))->LogMqd,buf,((LOG_SERVER *)(LogServerID.sival_ptr))->MqAttr.mq_msgsize,&prio)==(mqd_t)-1)
-	{
-		fprintf(stderr, "mq_receive error File:%s:%d %s", __FILE__, __LINE__,strerror(errno));
-		exit(-1);
-	}
-	fd=open(((LOG_SERVER *)(LogServerID.sival_ptr))->LogFileDir ,O_WRONLY|O_APPEND|O_CREAT,755);
-	if(fd==-1)
-	{
-		return;
-	}
-	write(fd,buf,strlen(buf));
-	#ifdef DEBUG
-		fprintf(stdout,"%s",buf);
-		fflush(stdout);
-	#endif
-	close(fd);
-	return;
-}
 
 int main(void)
 {
@@ -917,6 +835,8 @@ int main(void)
 			ConnectionNum--;
 			WriteLogtoFile(&LogMqServer,errno,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 		}
+		printf("####%d####\n",ConnectionNum);
+		fflush(stdout);
 	}
 	
 	WriteLogtoFile(&LogMqServer,1,"INF httpd server stop!\n");
