@@ -25,6 +25,8 @@
 
 //#define ACCESS_CHECKING_ENABLE
 #define ALLOW_MAX_CONNECTION (20)
+#define FIRE_IP "192.168.*.1-180"
+
 
 typedef struct
 {
@@ -218,7 +220,8 @@ void *Deal_Request(void *psocket)
 
 	if(AccessChecking(&msg_client)!=0)
 	{
-		//close(client);
+			
+		close(client);
 		ConnectionDel(&LoadCtrl);
 		return (NULL);
 	}
@@ -270,12 +273,12 @@ int AccessChecking(RESPONSE_MSG *request)
 	if (getpeername(request->ClientSocket,(struct sockaddr *)&peeraddr, &namelen) != -1)
 	{
 		sprintf(request->ClientIP,"%s",(char *)inet_ntoa(peeraddr.sin_addr));
-		WriteLogtoFile(&LogMqServer,2,"INF Client IP:%s\n",request->ClientIP);
+		//WriteLogtoFile(&LogMqServer,2,"INF Client IP:%s\n",request->ClientIP);
 	}else
 	{
 		WriteLogtoFile(&LogMqServer,errno,"SYS Failed to get the customer IP in file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 	}
-	if(IPMatch(request->ClientIP)==0)
+	if(IPMatch(request->ClientIP)==1)
 	{
 		request->ErrorCode=-1;
 		request->StaticMsg.StatusCode=503;//The file is not found
@@ -548,13 +551,11 @@ int ResponseError(RESPONSE_MSG *request)
 		request->StaticMsg.ContentLength=st.st_size+2;
 	}
 	Send_ResponseLineToClient(request->ClientSocket,StatusCode,Get_ErrorDes(StatusCode));
-	printf("%s\n",Get_ErrorDes(StatusCode));
 	Send_ResponseHeadToClient(request->ClientSocket,"Content-Type",request->StaticMsg.ContentType);
 	sprintf(buf,"%ld",request->StaticMsg.ContentLength);
 	Send_ResponseHeadToClient(request->ClientSocket,"Content-Length",buf);
 	Send_ResponseHeadToClient(request->ClientSocket,"Connection","close");
 	Send_ResponseBlankLineToClient(request->ClientSocket);
-	printf("%s\n",Get_ErrorFileFd(StatusCode));
 	Send_ResponseBodyToClient(request->ClientSocket,Get_ErrorFileFd(StatusCode));
 	WriteLogtoFile(&LogMqServer,StatusCode,"PARE ResponseError Eorror %s\n",Get_ErrorDes(StatusCode));
 	return 0;
@@ -663,8 +664,102 @@ int Get_Line(int sock, char *buf, int size)
 
 int IPMatch(const char *ClientIP)
 {
-	(void)ClientIP;
-	return 0;
+	int i=0;
+	int j=0;
+	int ret=0;
+	const char *IPRange=FIRE_IP;
+	for(i=0;i<4;i++)
+	{
+		int srnum=0;
+		int desdown=0;
+		int desup=0;
+		for(j=0;(isdigit(*ClientIP))&&(*ClientIP!='\0');ClientIP++,j++)
+		{
+			srnum=(*(ClientIP)-0x30)+srnum*10;
+		}
+		if(srnum<1||srnum>255)
+		{
+			return -1;
+		}
+		if((*ClientIP!=((i<3)?'.':'\0'))||j>3||j==0)
+		{
+			return -2;
+		}
+		ClientIP++;
+		for(j=0;isdigit(*IPRange)&&(*IPRange!='\0');IPRange++,j++)
+		{
+			desdown=((*IPRange)-0x30)+desdown*10;
+		}
+		if(desdown<0||desdown>255)
+		{
+			return -3;
+		}
+		if(j>3)
+		{
+			return -4;
+		}
+		if(j==0) 
+		{
+			if(*IPRange=='*')
+			{
+				desdown=1;
+				desup=255;
+			}else
+			{
+				return -5;
+			}
+			IPRange++;
+			if(((*IPRange)!=((i<3)?'.':'\0'))||j>3)
+			{
+				return -6;
+			}else
+			{
+				IPRange++;
+			}
+		}else
+		{
+			if(*IPRange=='.')
+			{
+				if(i==3)
+				{
+					return -7;
+				}
+				desup=desdown;
+				IPRange++;
+			}else if(*IPRange=='-')
+			{			
+				IPRange++;
+				for(j=0;isdigit(*IPRange)&&(*IPRange!='\0');IPRange++,j++)
+				{
+					desup=(*(IPRange)-0x30)+desup*10;
+				}
+				if(srnum<1||srnum>255)
+				{
+					return -8;
+				}
+				if((*IPRange!=((i<3)?'.':'\0'))||j>3||j==0)
+				{
+					return -9;
+				}
+				IPRange++;
+			}else
+			{
+				return -10;
+			}
+		}
+		if(srnum>=desdown&&srnum<=desup)
+		{
+			ret++;
+		}
+	}
+	if(ret==4)
+	{
+		return 1;
+	}else 
+	{
+		return 0;
+	}
+	return -11;
 }
 	
 int Get_ImageFileType(RESPONSE_MSG *request)
@@ -802,7 +897,6 @@ int ConnectionGet(LOAD_TYPE *load)
 
 int Startup_LogServer(LOG_SERVER *LogServerID)
 {
-	//mq_unlink(LogServerID->MqDir);
 	if((LogServerID->LogMqd = mq_open(LogServerID->MqDir,O_CREAT |O_RDWR,0666,NULL))==(mqd_t)-1)
 	{
 		fprintf(stdout, "mq_open error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
@@ -932,7 +1026,13 @@ int main(int argc,char *argv[])
 				exit(-1);
 		}
 	} 
-	
+	#ifdef ACCESS_CHECKING_ENABLE
+		if(IPMatch("192.168.1.1")<0)
+		{
+			fprintf(stdout, "FIRE_IP Invalid format error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+			exit(-1);
+		}
+	#endif
 	if(signal(SIGINT,QuitSignal)==SIG_ERR)
 	{
 		fprintf(stdout, "signal error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
