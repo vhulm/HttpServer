@@ -52,6 +52,7 @@ typedef struct
 	char URL[1024];
 	char Path[1024];
 	char *QueryStr;
+	int Content_Length;
 	RESPONSE_STATIC_MSG StaticMsg;
 	RESPONSE_CGI_MSG CgiMsg;
 }RESPONSE_MSG;
@@ -337,7 +338,6 @@ int ParseRequest(RESPONSE_MSG *request)
 	}
 	request->URL[i] = '\0';
 
-
 	if (strcasecmp(request->Method, "GET") == 0)
 	{
 		request->QueryStr= request->URL;
@@ -358,10 +358,35 @@ int ParseRequest(RESPONSE_MSG *request)
 	{
 		strcat(request->Path, "index.html");
 	}
+	
+	request->Content_Length=-1;
 
-	while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
+	if (strcasecmp(request->Method, "GET") == 0)
+	{
+		while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
+		{
+			numchars= Get_Line(request->ClientSocket, buf, sizeof(buf));
+		}
+	}
+	else    /* POST */
 	{
 		numchars = Get_Line(request->ClientSocket, buf, sizeof(buf));
+		while ((numchars > 0) && strcmp("\n", buf))
+		{
+			buf[15] = '\0';
+			if (strcasecmp(buf, "Content-Length:") == 0)
+			{
+				request->Content_Length = atoi(&(buf[16]));
+			}
+			numchars = Get_Line(request->ClientSocket, buf, sizeof(buf));
+		}
+		if (request->Content_Length == -1) 
+		{
+			request->ErrorCode=-1;
+			request->StaticMsg.StatusCode=400;
+			ResponseError(request);
+			return -1;
+		}
 	}
 	return 0;
 }
@@ -407,7 +432,9 @@ int ResponseClient(RESPONSE_MSG *request)
 	{
 		if(ISCGI_FILE(request->ParseState))//CGI FILE
 		{
+			printf("cgi start \n");
 			Execute_CGI(request);
+			printf("cgi end \n");
 
 		}else//TEXT FILE
 		{
@@ -421,108 +448,90 @@ int ResponseClient(RESPONSE_MSG *request)
 	return 0;
 }
 
-/**********************************************************************/
-/* Execute a CGI script.  Will need to set environment variables as
- * appropriate.
- * Parameters: client socket descriptor
- *             path to the CGI script */
-/**********************************************************************/
 int Execute_CGI(RESPONSE_MSG *request)
 {
- char buf[1024];
- int cgi_output[2];
- int cgi_input[2];
- pid_t pid;
- int status;
- int i;
- char c;
- int numchars = 1;
- int content_length = -1;
+	char buf[1024];
+	int cgi_output[2];
+	int cgi_input[2];
+	pid_t pid;
+	int status;
+	int i;
+	char c;
 
- buf[0] = 'A'; buf[1] = '\0';
- if (strcasecmp(request->Method, "GET") == 0)
-  while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
-   numchars = Get_Line(request->ClientSocket, buf, sizeof(buf));
- else    /* POST */
- {
-  numchars = Get_Line(request->ClientSocket, buf, sizeof(buf));
-  while ((numchars > 0) && strcmp("\n", buf))
-  {
-   buf[15] = '\0';
-   if (strcasecmp(buf, "Content-Length:") == 0)
-    content_length = atoi(&(buf[16]));
-   numchars = Get_Line(request->ClientSocket, buf, sizeof(buf));
-  }
-  if (content_length == -1) 
-  	{
-  	request->ErrorCode=-1;
-	request->StaticMsg.StatusCode=400;
-	ResponseError(request);
-   return -1;
-  }
- }
+	if (pipe(cgi_output) < 0)
+	{
+		request->ErrorCode=-1;
+		request->StaticMsg.StatusCode=500;
+		ResponseError(request);
+		return -1;
+	}
+	if (pipe(cgi_input) < 0)
+	{
+		request->ErrorCode=-1;
+		request->StaticMsg.StatusCode=500;
+		ResponseError(request);
+		return -1;
+	}
 
- sprintf(buf, "HTTP/1.0 200 OK\r\n");
- send(request->ClientSocket, buf, strlen(buf), 0);
+	if ( (pid = fork()) < 0 )
+	{
+		request->ErrorCode=-1;
+		request->StaticMsg.StatusCode=500;
+		ResponseError(request);
+		return -1;
+	}
+	if (pid == 0)  /* child: CGI script */
+	{
+		char meth_env[255];
+		char query_env[255];
+		char length_env[255];
 
- if (pipe(cgi_output) < 0) {
-	  request->ErrorCode=-1;
-	  request->StaticMsg.StatusCode=500;
-	  ResponseError(request);
-	  return -1;
- }
- if (pipe(cgi_input) < 0) {
-	  request->ErrorCode=-1;
-	  request->StaticMsg.StatusCode=500;
-	  ResponseError(request);
-	  return -1;
- }
+		dup2(cgi_output[1], 1);
+		dup2(cgi_input[0], 0);
+		close(cgi_output[0]);
+		close(cgi_input[1]);
+		sprintf(meth_env, "REQUEST_METHOD=%s", request->Method);
+		putenv(meth_env);
 
- if ( (pid = fork()) < 0 ) {
-	  request->ErrorCode=-1;
-	  request->StaticMsg.StatusCode=500;
-	  ResponseError(request);
-	  return -1;
-
- }
- if (pid == 0)  /* child: CGI script */
- {
-  char meth_env[255];
-  char query_env[255];
-  char length_env[255];
-
-  dup2(cgi_output[1], 1);
-  dup2(cgi_input[0], 0);
-  close(cgi_output[0]);
-  close(cgi_input[1]);
-  sprintf(meth_env, "REQUEST_METHOD=%s", request->Method);
-  putenv(meth_env);
-  if (strcasecmp(request->Method, "GET") == 0) {
-   sprintf(query_env, "QUERY_STRING=%s", request->QueryStr);
-   putenv(query_env);
-  }
-  else {   /* POST */
-   sprintf(length_env, "CONTENT_LENGTH=%d", content_length);
-   putenv(length_env);
-  }
-  execl(request->Path, request->Path, NULL);
-  exit(0);
- } else {    /* parent */
-  close(cgi_output[1]);
-  close(cgi_input[0]);
-  if (strcasecmp(request->Method, "POST") == 0)
-   for (i = 0; i < content_length; i++) {
-    recv(request->ClientSocket, &c, 1, 0);
-    write(cgi_input[1], &c, 1);
-   }
-  while (read(cgi_output[0], &c, 1) > 0)
-   send(request->ClientSocket, &c, 1, 0);
-
-  close(cgi_output[0]);
-  close(cgi_input[1]);
-  waitpid(pid, &status, 0);
- }
- return 0;
+		if (strcasecmp(request->Method, "GET") == 0) 
+		{
+			sprintf(query_env, "QUERY_STRING=%s", request->QueryStr);
+			putenv(query_env);
+		}
+		else 
+		{   /* POST */
+			sprintf(length_env, "CONTENT_LENGTH=%d", request->Content_Length);
+			putenv(length_env);
+		}
+		execl(request->Path, request->Path, NULL);
+		exit(0);
+	} else 
+	{    /* parent */
+		close(cgi_output[1]);
+		close(cgi_input[0]);
+		
+		sprintf(buf, "HTTP/1.0 200 OK CGI\r\n");
+		send(request->ClientSocket, buf, strlen(buf), 0);
+		sprintf(buf, "\r\n");
+		send(request->ClientSocket, buf, strlen(buf), 0);
+		
+		if (strcasecmp(request->Method, "POST") == 0)
+		{
+			for (i = 0; i < request->Content_Length; i++)
+			{
+				recv(request->ClientSocket, &c, 1, 0);
+				write(cgi_input[1], &c, 1);
+			}
+		}
+		while (read(cgi_output[0], &c, 1) > 0)
+		{
+			send(request->ClientSocket, &c, 1, 0);
+		}
+		close(cgi_output[0]);
+		close(cgi_input[1]);
+		waitpid(pid, &status, 0);
+	}
+	return 0;
 }
 
 
@@ -615,8 +624,6 @@ int Send_ResponseBodyToClient(int client,const char *path)
 	return 0;
 }
 
-
-
 /**********************************************************************/
 /* Get a line from a socket, whether the line ends in a newline,
  * carriage return, or a CRLF combination.  Terminates the string read
@@ -632,32 +639,38 @@ int Send_ResponseBodyToClient(int client,const char *path)
 /**********************************************************************/
 int Get_Line(int sock, char *buf, int size)
 {
- int i = 0;
- char c = '\0';
- int n;
+	int i = 0;
+	char c = '\0';
+	int n;
 
- while ((i < size - 1) && (c != '\n'))
- {
-  n = recv(sock, &c, 1, 0);
-  /* DEBUG printf("%02X\n", c); */
-  if (n > 0)
-  {
-   if (c == '\r')
-   {
-    n = recv(sock, &c, 1, MSG_PEEK);
-    /* DEBUG printf("%02X\n", c); */
-    if ((n > 0) && (c == '\n'))
-     recv(sock, &c, 1, 0);
-    else
-     c = '\n';
-   }
-   buf[i] = c;
-   i++;
-  }
-  else
-   c = '\n';
- }
- buf[i] = '\0';
+	while ((i < size - 1) && (c != '\n'))
+	{
+		n = recv(sock, &c, 1, 0);
+		/* DEBUG printf("%02X\n", c); */
+		if (n > 0)
+		{
+			if (c == '\r')
+			{
+				n = recv(sock, &c, 1, MSG_PEEK);
+				/* DEBUG printf("%02X\n", c); */
+				if ((n > 0) && (c == '\n'))
+				{
+					recv(sock, &c, 1, 0);
+				}
+				else
+				{
+					c = '\n';
+				}
+			}
+			buf[i] = c;
+			i++;
+		}
+		else
+		{
+			c = '\n';
+		}
+	}
+	buf[i] = '\0';
  
  return(i);
 }
@@ -989,11 +1002,13 @@ int WriteLogtoFile(LOG_SERVER *LogServerID,int err,const char *fmt,...)
 
 void QuitSignal(int sig)
 {
-	(void)sig;
-	mq_unlink(LogMqServer.MqDir);
-	semctl(LoadCtrl.SemID,0,IPC_RMID,0);
-	printf("HttpServer Service to stop\n");
-	exit(-1);
+	if(sig==SIGINT)
+	{
+		mq_unlink(LogMqServer.MqDir);
+		semctl(LoadCtrl.SemID,0,IPC_RMID,0);
+		printf("HttpServer Service to stop\n");
+		exit(-1);
+	}
 }
 
 int main(int argc,char *argv[])
