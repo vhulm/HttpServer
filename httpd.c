@@ -1,16 +1,12 @@
 #include <stdio.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <ctype.h>
 #include <strings.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <pthread.h>
-#include <sys/wait.h>
-#include <stdlib.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -18,6 +14,12 @@
 #include <signal.h>
 #include <sys/ipc.h>
 #include <sys/sem.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #define DEBUG
 
@@ -26,6 +28,7 @@
 //#define ACCESS_CHECKING_ENABLE
 #define ALLOW_MAX_CONNECTION (20)
 #define FIRE_IP "192.168.*.1-180"
+#define MAX_CLINET_MGR_NUM (ALLOW_MAX_CONNECTION+1+9)
 
 
 typedef struct
@@ -53,6 +56,7 @@ typedef struct
 	char Path[1024];
 	char *QueryStr;
 	int Content_Length;
+	int KeepLive;
 	RESPONSE_STATIC_MSG StaticMsg;
 	RESPONSE_CGI_MSG CgiMsg;
 }RESPONSE_MSG;
@@ -106,7 +110,38 @@ typedef struct
 	union semun Arg;
 }LOAD_TYPE; 
 
-LOAD_TYPE LoadCtrl={.MaxContion=20};
+LOAD_TYPE LoadCtrl={.MaxContion=ALLOW_MAX_CONNECTION};
+
+typedef struct
+{
+	int fd;	//-1 连接已经被销毁
+	int ConnectState; //-1 连接请求被销毁0连接不在加入select 1连接需要加入Selcet
+	time_t LastMtime;
+	int WaitTime;
+}ST_CLIENT_MGR;
+
+ST_CLIENT_MGR client_mgr[MAX_CLINET_MGR_NUM]={	{-1, 1,0, 0},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
+												};
+
+
+typedef struct
+{
+	fd_set Readfds;
+	int Maxfdp;
+	ST_CLIENT_MGR *pt_CilenMgr;
+	LOAD_TYPE *pt_LoadCtrl;
+}ST_CONNECT_MGR;
+
+ST_CONNECT_MGR connect_mgr={.pt_CilenMgr=client_mgr,.pt_LoadCtrl=&LoadCtrl};
 
 extern int errno;
 
@@ -148,6 +183,13 @@ int Register_logThread(LOG_SERVER *LogServerID);
 void Log_ServerThread(union sigval LogServerID);
 
 int WriteLogtoFile(LOG_SERVER *LogServerID,int err,const char *fmt,...);
+
+
+int UpdateSelect(ST_CONNECT_MGR *pt_connect);
+int AddSelect(ST_CONNECT_MGR *pt_connect,int client_sock,int timeout);
+int QuryDelSelect(ST_CONNECT_MGR *pt_connect,int client_sock);
+int ChangeClientSta(ST_CONNECT_MGR *pt_connect,int client_sock,int state,int timeout);
+int CheckSelect(ST_CONNECT_MGR *pt_connect);
 
 /**********************************************************************/
 /* This function starts the process of listening for web connections
@@ -214,39 +256,35 @@ void *Deal_Request(void *psocket)
 	memset(&msg_client,0,sizeof(msg_client));
 	if(LoadControl(client,&msg_client,&LoadCtrl)!=0)
 	{
-		close(client);
-		ConnectionDel(&LoadCtrl);
+		QuryDelSelect(&connect_mgr,client);
 		return (NULL);
 	}
 
 	if(AccessChecking(&msg_client)!=0)
 	{
 			
-		close(client);
-		ConnectionDel(&LoadCtrl);
+		QuryDelSelect(&connect_mgr,client);
 		return (NULL);
 	}
 	if(ParseRequest(&msg_client)!=0)
 	{
-		close(client);
-		ConnectionDel(&LoadCtrl);
+		QuryDelSelect(&connect_mgr,client);
 		return (NULL);
 	}
 	if(CheckRequest(&msg_client)!=0)
 	{
-		close(client);
-		ConnectionDel(&LoadCtrl);
+		QuryDelSelect(&connect_mgr,client);
 		return (NULL);	
 	}
 	if(ResponseClient(&msg_client)!=0)
 	{
-		close(client);
-		ConnectionDel(&LoadCtrl);
+		QuryDelSelect(&connect_mgr,client);
 		return (NULL);
 	}
 	WriteLogtoFile(&LogMqServer,9,"Method:%s URL:%s Path:%s QueryStr:%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.QueryStr);
- 	close(client);
-	ConnectionDel(&LoadCtrl);
+	msg_client.KeepLive=50;
+	ChangeClientSta(&connect_mgr,client,1,msg_client.KeepLive);
+
 	return ((void*)(NULL));
 }
 
@@ -308,6 +346,10 @@ int ParseRequest(RESPONSE_MSG *request)
 		return -1;
 	}
 	numchars=Get_Line(request->ClientSocket,buf,MAXBUFSIZE);
+	if(numchars==-1)
+	{
+		return -3;
+	}
 	i = 0; j = 0;
 	while (!ISspace(buf[j]) && (i < sizeof(request->Method) - 1))
 	{
@@ -366,11 +408,19 @@ int ParseRequest(RESPONSE_MSG *request)
 		while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
 		{
 			numchars= Get_Line(request->ClientSocket, buf, sizeof(buf));
+			if(numchars==-1)
+			{
+				return -3;
+			}
 		}
 	}
 	else    /* POST */
 	{
 		numchars = Get_Line(request->ClientSocket, buf, sizeof(buf));
+		if(numchars==-1)
+		{
+			return -3;
+		}
 		while ((numchars > 0) && strcmp("\n", buf))
 		{
 			buf[15] = '\0';
@@ -379,6 +429,10 @@ int ParseRequest(RESPONSE_MSG *request)
 				request->Content_Length = atoi(&(buf[16]));
 			}
 			numchars = Get_Line(request->ClientSocket, buf, sizeof(buf));
+			if(numchars==-1)
+			{
+				return -3;
+			}
 		}
 		if (request->Content_Length == -1) 
 		{
@@ -432,10 +486,7 @@ int ResponseClient(RESPONSE_MSG *request)
 	{
 		if(ISCGI_FILE(request->ParseState))//CGI FILE
 		{
-			printf("cgi start \n");
 			Execute_CGI(request);
-			printf("cgi end \n");
-
 		}else//TEXT FILE
 		{
 			request->StaticMsg.StatusCode=200;
@@ -543,7 +594,7 @@ int ResponseStaticFiles(RESPONSE_MSG *request)
 	Send_ResponseHeadToClient(request->ClientSocket,"Content-Type",request->StaticMsg.ContentType);
 	sprintf(buf,"%ld",request->StaticMsg.ContentLength);
 	Send_ResponseHeadToClient(request->ClientSocket,"Content-Length",buf);
-	Send_ResponseHeadToClient(request->ClientSocket,"Connection","close");
+	Send_ResponseHeadToClient(request->ClientSocket,"Connection","keep-Alive");
 	Send_ResponseBlankLineToClient(request->ClientSocket);
 	Send_ResponseBodyToClient(request->ClientSocket,request->Path);
 	return 0;
@@ -646,13 +697,11 @@ int Get_Line(int sock, char *buf, int size)
 	while ((i < size - 1) && (c != '\n'))
 	{
 		n = recv(sock, &c, 1, 0);
-		/* DEBUG printf("%02X\n", c); */
 		if (n > 0)
 		{
 			if (c == '\r')
 			{
 				n = recv(sock, &c, 1, MSG_PEEK);
-				/* DEBUG printf("%02X\n", c); */
 				if ((n > 0) && (c == '\n'))
 				{
 					recv(sock, &c, 1, 0);
@@ -668,6 +717,11 @@ int Get_Line(int sock, char *buf, int size)
 		else
 		{
 			c = '\n';
+		}
+		if(n==-1)
+		{
+			printf("Clinet close! Get_Line\n");
+			return -1;
 		}
 	}
 	buf[i] = '\0';
@@ -797,7 +851,6 @@ int Get_ImageFileType(RESPONSE_MSG *request)
 	}else if((memcmp(buf,JPG,2)==0))
 	{
 		sprintf(request->StaticMsg.ContentType,"image/jpg");
-		printf("jpg\n");
 	}else if((memcmp(&buf[1],"PNG",3)==0))
 	{
 		sprintf(request->StaticMsg.ContentType,"image/png");
@@ -882,6 +935,7 @@ int ConnectionDel(LOAD_TYPE *load)
 	load->Opt.sem_num=0;
 	load->Opt.sem_op=1;
 	load->Opt.sem_flg=0;
+	printf("del\n");
 	ret=semop(load->SemID,&(load->Opt),1);
 	if(ret==-1)
 	{
@@ -897,6 +951,7 @@ int ConnectionGet(LOAD_TYPE *load)
 	load->Opt.sem_num=0;
 	load->Opt.sem_op=-1;
 	load->Opt.sem_flg=0;
+	printf("get\n");
 
 	ret=semop(load->SemID,&(load->Opt),1);
 	if(ret==-1)
@@ -1011,6 +1066,142 @@ void QuitSignal(int sig)
 	}
 }
 
+int UpdateSelect(ST_CONNECT_MGR *pt_connect)
+{
+	int i=0;
+	ST_CLIENT_MGR *pt_cli=NULL;
+	pt_connect->Maxfdp=0;
+	FD_ZERO(&(pt_connect->Readfds));
+	for(i=0;i<MAX_CLINET_MGR_NUM;i++)
+	{
+		pt_cli=((pt_connect->pt_CilenMgr)+i);
+		if(pt_cli->ConnectState==1)
+		{
+			FD_SET((pt_cli->fd),&(pt_connect->Readfds));
+			pt_connect->Maxfdp=(pt_cli->fd >(pt_connect->Maxfdp))?pt_cli->fd:(pt_connect->Maxfdp);
+		}else if(pt_cli->ConnectState==-1)
+		{
+			pt_cli->ConnectState=-2;
+			close(pt_cli->fd);
+			ConnectionDel(pt_connect->pt_LoadCtrl);
+			pt_cli->fd=-1;
+		}
+	}
+	return 0;
+}
+
+int AddSelect(ST_CONNECT_MGR *pt_connect,int client_sock,int timeout)
+{
+	int i=0;
+	time_t CurTime;
+	CurTime=time(NULL);
+	ST_CLIENT_MGR *pt_cli=NULL;
+	for(i=1;i<MAX_CLINET_MGR_NUM;i++)
+	{
+		pt_cli=((pt_connect->pt_CilenMgr)+i);
+		if(pt_cli->fd==-1)
+		{
+			pt_cli->fd=client_sock;
+			pt_cli->ConnectState=1;
+			pt_cli->LastMtime=CurTime;
+			pt_cli->WaitTime=timeout;
+			return i;
+		}
+	}
+	return -1;
+}
+
+int QuryDelSelect(ST_CONNECT_MGR *pt_connect,int client_sock)
+{
+	int i=0;
+	ST_CLIENT_MGR *pt_cli=NULL;
+	for(i=1;i<MAX_CLINET_MGR_NUM;i++)
+	{
+		pt_cli=((pt_connect->pt_CilenMgr)+i);
+		if(pt_cli->fd==client_sock)
+		{
+			pt_cli->ConnectState=-1;
+			return i;
+		}
+	}
+	return -1;
+}
+
+int ChangeClientSta(ST_CONNECT_MGR *pt_connect,int client_sock,int state,int timeout)
+{
+	int i=0;
+	ST_CLIENT_MGR *pt_cli=NULL;
+	timeout=(timeout<0)?0:timeout;
+	timeout=(timeout>120)?120:timeout;
+	for(i=1;i<MAX_CLINET_MGR_NUM;i++)
+	{
+		pt_cli=((pt_connect->pt_CilenMgr)+i);
+		if(pt_cli->fd==client_sock)
+		{
+			pt_cli->ConnectState=state;
+			pt_cli->WaitTime=timeout;
+			return i;
+		}
+	}
+	return -1;
+}
+
+int CheckSelect(ST_CONNECT_MGR *pt_connect)
+{
+	int i=0;
+	time_t CurTime;
+	int client_sock;
+	struct sockaddr_in client_name;
+	socklen_t client_name_len = sizeof(client_name);
+	pthread_t newthread;
+	ST_CLIENT_MGR *pt_cli=NULL;
+	pt_cli=((pt_connect->pt_CilenMgr)+i);
+	CurTime=time(NULL);
+	if(FD_ISSET(pt_cli->fd,&(pt_connect->Readfds)))
+	{	
+		client_sock = accept(pt_cli->fd,(struct sockaddr *)&client_name,&client_name_len);
+		printf("accept\n");
+		if (client_sock == -1)
+		{
+			WriteLogtoFile(&LogMqServer,errno,"SYS accept_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+		}else
+		{
+			AddSelect(pt_connect,client_sock,10);
+			ConnectionGet(pt_connect->pt_LoadCtrl);
+		}
+	}
+	for(i=1;i<MAX_CLINET_MGR_NUM;i++)
+	{
+		pt_cli=((pt_connect->pt_CilenMgr)+i);
+		if((pt_cli->fd!=-1)&&(FD_ISSET(pt_cli->fd,&(pt_connect->Readfds))))
+		{
+			if (pthread_create(&newthread , NULL, Deal_Request, (void *)&(pt_cli->fd)) != 0)
+			{
+				ConnectionDel(pt_connect->pt_LoadCtrl);
+				WriteLogtoFile(&LogMqServer,errno,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+			}
+			pt_cli->ConnectState=0;
+			pt_cli->LastMtime=CurTime;
+			pt_cli->WaitTime=15;
+		}
+		if((pt_cli->ConnectState)==1)	//处于连接监控
+		{
+				//printf("CurTime: %ld\n",CurTime);
+				//printf("LastMtime: %ld\n",(pt_cli->LastMtime));
+				//printf("WaitTime: %ld\n",(pt_cli->WaitTime));
+			if((CurTime-(pt_cli->LastMtime))>(pt_cli->WaitTime))
+			{
+				printf("time out\n");
+				pt_cli->ConnectState=-2;
+				close(pt_cli->fd);
+				ConnectionDel(pt_connect->pt_LoadCtrl);
+				pt_cli->fd=-1;
+			}
+		}
+	}
+	return 0;
+}
+
 int main(int argc,char *argv[])
 {
 	int ch; 
@@ -1018,11 +1209,7 @@ int main(int argc,char *argv[])
 
 	int server_sock = -1;
 	u_short port = 8855;
-	int client_sock = -1;
-	struct sockaddr_in client_name;
-	socklen_t client_name_len = sizeof(client_name);
-	pthread_t newthread;
-
+	
 	while ((ch = getopt(argc,argv,"p:"))!=-1)
 	{  
 		switch(ch)  
@@ -1061,22 +1248,21 @@ int main(int argc,char *argv[])
 	server_sock = Startup(&port);
 	WriteLogtoFile(&LogMqServer,0,"INF httpd running on port %d\n", port);
 
+	client_mgr[0].fd=server_sock;
+	client_mgr[0].LastMtime=time(NULL);
+
 	while (1)
 	{
-		client_sock = accept(server_sock,(struct sockaddr *)&client_name,&client_name_len);
-
-		if (client_sock == -1)
-		{
-			WriteLogtoFile(&LogMqServer,errno,"SYS accept_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
-			continue;
-		}
-
-		ConnectionGet(&LoadCtrl);
-
-		if (pthread_create(&newthread , NULL, Deal_Request, (void *)&client_sock) != 0)
-		{
-			ConnectionDel(&LoadCtrl);
-			WriteLogtoFile(&LogMqServer,errno,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+		UpdateSelect(&connect_mgr);
+		switch(select((connect_mgr.Maxfdp)+1,&(connect_mgr.Readfds),NULL,NULL,NULL))
+		{ 
+			case -1: 
+				exit(-1);
+				break;
+			case 0:
+				break;
+			default: 
+				CheckSelect(&connect_mgr);
 		}
 	}
 	
@@ -1086,3 +1272,4 @@ int main(int argc,char *argv[])
 
 	return(0);
 }
+
