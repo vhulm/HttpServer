@@ -112,36 +112,44 @@ typedef struct
 
 LOAD_TYPE LoadCtrl={.MaxContion=ALLOW_MAX_CONNECTION};
 
+/*
+*	ConnectState =   2  //请求加入select监控	已经设置好fd和WaitTime（有效）
+*	ConnectState =   1  //正在被select监控		已经设置好fd和WaitTime（有效）
+*	ConnectState =   0  //暂时脱离select监控	已经设置好fd和WaitTime（有效）
+*	ConnectState = -1  //请求脱离select监控	已经设置好fd和WaitTime（有效）
+*	ConnectState = -2  //已经脱离select监控	fd=-1
+*/
 typedef struct
 {
 	int fd;	//-1 连接已经被销毁
-	int ConnectState; //-1 连接请求被销毁0连接不在加入select 1连接需要加入Selcet
+	int ConnectState; 
 	time_t LastMtime;
 	int WaitTime;
 }ST_CLIENT_MGR;
 
-ST_CLIENT_MGR client_mgr[MAX_CLINET_MGR_NUM]={	{-1, 1,0, 0},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2,0,30},{-1,-2,0,30},{-1,-2,0,30},
+ST_CLIENT_MGR client_mgr[MAX_CLINET_MGR_NUM]={	{-1, 1,-1,-1},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
+												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
 												};
 
 
 typedef struct
 {
-	fd_set Readfds;
 	int Maxfdp;
+	fd_set Readfds;
+	struct timeval Timeout;
 	ST_CLIENT_MGR *pt_CilenMgr;
 	LOAD_TYPE *pt_LoadCtrl;
 }ST_CONNECT_MGR;
 
-ST_CONNECT_MGR connect_mgr={.pt_CilenMgr=client_mgr,.pt_LoadCtrl=&LoadCtrl};
+ST_CONNECT_MGR connect_mgr={.Timeout={1,0},.pt_CilenMgr=client_mgr,.pt_LoadCtrl=&LoadCtrl};
 
 extern int errno;
 
@@ -173,7 +181,7 @@ const char *Get_ErrorDes(int StatusCode);	//根据错误码返回http响应行描述信息，如
 const char *Get_ErrorFileFd(int StatusCode);//根据错误码返回错误页路径，如果列表找不到返回第一条记录
 
 
-int StartLoadSever(LOAD_TYPE *load);
+int Startup_LoadSever(LOAD_TYPE *load);
 int Get_ConnectionNum(LOAD_TYPE *load);
 int ConnectionDel(LOAD_TYPE *load);
 int ConnectionGet(LOAD_TYPE *load);
@@ -190,6 +198,8 @@ int AddSelect(ST_CONNECT_MGR *pt_connect,int client_sock,int timeout);
 int QuryDelSelect(ST_CONNECT_MGR *pt_connect,int client_sock);
 int ChangeClientSta(ST_CONNECT_MGR *pt_connect,int client_sock,int state,int timeout);
 int CheckSelect(ST_CONNECT_MGR *pt_connect);
+int TimeOutDeal(ST_CONNECT_MGR *pt_connect);
+
 
 /**********************************************************************/
 /* This function starts the process of listening for web connections
@@ -282,8 +292,8 @@ void *Deal_Request(void *psocket)
 		return (NULL);
 	}
 	WriteLogtoFile(&LogMqServer,9,"Method:%s URL:%s Path:%s QueryStr:%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.QueryStr);
-	msg_client.KeepLive=50;
-	ChangeClientSta(&connect_mgr,client,1,msg_client.KeepLive);
+	msg_client.KeepLive=20;
+	ChangeClientSta(&connect_mgr,client,2,msg_client.KeepLive);
 
 	return ((void*)(NULL));
 }
@@ -594,7 +604,7 @@ int ResponseStaticFiles(RESPONSE_MSG *request)
 	Send_ResponseHeadToClient(request->ClientSocket,"Content-Type",request->StaticMsg.ContentType);
 	sprintf(buf,"%ld",request->StaticMsg.ContentLength);
 	Send_ResponseHeadToClient(request->ClientSocket,"Content-Length",buf);
-	Send_ResponseHeadToClient(request->ClientSocket,"Connection","keep-Alive");
+	Send_ResponseHeadToClient(request->ClientSocket,"Connection","keep-alive");
 	Send_ResponseBlankLineToClient(request->ClientSocket);
 	Send_ResponseBodyToClient(request->ClientSocket,request->Path);
 	return 0;
@@ -614,7 +624,7 @@ int ResponseError(RESPONSE_MSG *request)
 	Send_ResponseHeadToClient(request->ClientSocket,"Content-Type",request->StaticMsg.ContentType);
 	sprintf(buf,"%ld",request->StaticMsg.ContentLength);
 	Send_ResponseHeadToClient(request->ClientSocket,"Content-Length",buf);
-	Send_ResponseHeadToClient(request->ClientSocket,"Connection","close");
+	Send_ResponseHeadToClient(request->ClientSocket,"Connection","keep-alive");
 	Send_ResponseBlankLineToClient(request->ClientSocket);
 	Send_ResponseBodyToClient(request->ClientSocket,Get_ErrorFileFd(StatusCode));
 	WriteLogtoFile(&LogMqServer,StatusCode,"PARE ResponseError Eorror %s\n",Get_ErrorDes(StatusCode));
@@ -893,7 +903,7 @@ const char *Get_ErrorFileFd(int StatusCode)
 	return ReqError[0].ErrorFile;
 }
 
-int StartLoadSever(LOAD_TYPE *load)
+int Startup_LoadSever(LOAD_TYPE *load)
 {
 	int ret;
 	load->Arg.val=load->MaxContion;
@@ -922,7 +932,7 @@ int Get_ConnectionNum(LOAD_TYPE *load)
 	if(val==-1)
 	{
 		WriteLogtoFile(&LogMqServer,errno,"SYS semctl error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
-		exit(-1);
+		raise(SIGINT);
 	}
 	printf("Load %d\n",(load->MaxContion)-val);
 	fflush(stdout);
@@ -940,7 +950,7 @@ int ConnectionDel(LOAD_TYPE *load)
 	if(ret==-1)
 	{
 		WriteLogtoFile(&LogMqServer,errno,"SYS semop error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
-		exit(-1);
+		raise(SIGINT);
 	}
 	return 0;
 }
@@ -957,7 +967,7 @@ int ConnectionGet(LOAD_TYPE *load)
 	if(ret==-1)
 	{
 		WriteLogtoFile(&LogMqServer,errno,"SYS semop error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
-		exit(-1);
+		raise(SIGINT);
 	}
 
 	return 0;
@@ -985,7 +995,7 @@ int Register_logThread(LOG_SERVER *LogServerID)
 	if(mq_notify(LogServerID->LogMqd,&(LogServerID->SigEnv)) == -1)
 	{
 		fprintf(stdout, "mq_notify error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
-		exit(-1);
+		raise(SIGINT);
 	}
 	return 0;
 }
@@ -1009,7 +1019,7 @@ void Log_ServerThread(union sigval LogServerID)
 		if((n=mq_receive(((LOG_SERVER *)(LogServerID.sival_ptr))->LogMqd,buf,((LOG_SERVER *)(LogServerID.sival_ptr))->MqAttr.mq_msgsize,&prio))==(mqd_t)-1)
 		{
 			fprintf(stdout, "mq_receive error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
-			exit(-1);
+			raise(SIGINT);
 		}
 
 		write(fd,buf,strlen(buf));
@@ -1075,11 +1085,16 @@ int UpdateSelect(ST_CONNECT_MGR *pt_connect)
 	for(i=0;i<MAX_CLINET_MGR_NUM;i++)
 	{
 		pt_cli=((pt_connect->pt_CilenMgr)+i);
+		if(pt_cli->ConnectState==2)
+		{
+			pt_cli->ConnectState=1;
+		}
 		if(pt_cli->ConnectState==1)
 		{
 			FD_SET((pt_cli->fd),&(pt_connect->Readfds));
 			pt_connect->Maxfdp=(pt_cli->fd >(pt_connect->Maxfdp))?pt_cli->fd:(pt_connect->Maxfdp);
-		}else if(pt_cli->ConnectState==-1)
+		}
+		if(pt_cli->ConnectState==-1)
 		{
 			pt_cli->ConnectState=-2;
 			close(pt_cli->fd);
@@ -1160,36 +1175,32 @@ int CheckSelect(ST_CONNECT_MGR *pt_connect)
 	if(FD_ISSET(pt_cli->fd,&(pt_connect->Readfds)))
 	{	
 		client_sock = accept(pt_cli->fd,(struct sockaddr *)&client_name,&client_name_len);
-		printf("accept\n");
+		printf("accept**********************************************************\n");
 		if (client_sock == -1)
 		{
 			WriteLogtoFile(&LogMqServer,errno,"SYS accept_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 		}else
 		{
-			AddSelect(pt_connect,client_sock,10);
+			AddSelect(pt_connect,client_sock,30);
 			ConnectionGet(pt_connect->pt_LoadCtrl);
 		}
 	}
 	for(i=1;i<MAX_CLINET_MGR_NUM;i++)
 	{
 		pt_cli=((pt_connect->pt_CilenMgr)+i);
-		if((pt_cli->fd!=-1)&&(FD_ISSET(pt_cli->fd,&(pt_connect->Readfds))))
-		{
-			if (pthread_create(&newthread , NULL, Deal_Request, (void *)&(pt_cli->fd)) != 0)
-			{
-				ConnectionDel(pt_connect->pt_LoadCtrl);
-				WriteLogtoFile(&LogMqServer,errno,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
-			}
-			pt_cli->ConnectState=0;
-			pt_cli->LastMtime=CurTime;
-			pt_cli->WaitTime=15;
-		}
 		if((pt_cli->ConnectState)==1)	//处于连接监控
 		{
-				//printf("CurTime: %ld\n",CurTime);
-				//printf("LastMtime: %ld\n",(pt_cli->LastMtime));
-				//printf("WaitTime: %ld\n",(pt_cli->WaitTime));
-			if((CurTime-(pt_cli->LastMtime))>(pt_cli->WaitTime))
+			if((FD_ISSET(pt_cli->fd,&(pt_connect->Readfds))))
+			{
+				if (pthread_create(&newthread , NULL, Deal_Request, (void *)&(pt_cli->fd)) != 0)
+				{
+					ConnectionDel(pt_connect->pt_LoadCtrl);
+					WriteLogtoFile(&LogMqServer,errno,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+				}
+				pt_cli->ConnectState=0;
+				pt_cli->LastMtime=CurTime;
+				pt_cli->WaitTime=3;
+			}else if((CurTime-(pt_cli->LastMtime))>(pt_cli->WaitTime))
 			{
 				printf("time out\n");
 				pt_cli->ConnectState=-2;
@@ -1201,6 +1212,30 @@ int CheckSelect(ST_CONNECT_MGR *pt_connect)
 	}
 	return 0;
 }
+
+int TimeOutDeal(ST_CONNECT_MGR *pt_connect)
+{
+	int i=0;
+	time_t CurTime;
+	ST_CLIENT_MGR *pt_cli=NULL;
+	pt_cli=((pt_connect->pt_CilenMgr)+i);
+	CurTime=time(NULL);
+
+	for(i=1;i<MAX_CLINET_MGR_NUM;i++)
+	{
+		pt_cli=((pt_connect->pt_CilenMgr)+i);
+		if(((pt_cli->ConnectState)==1)&&((CurTime-(pt_cli->LastMtime))>(pt_cli->WaitTime)))
+		{
+			printf("time out\n");
+			pt_cli->ConnectState=-2;
+			close(pt_cli->fd);
+			ConnectionDel(pt_connect->pt_LoadCtrl);
+			pt_cli->fd=-1;
+		}
+	}
+	return 0;
+}
+
 
 int main(int argc,char *argv[])
 {
@@ -1240,36 +1275,34 @@ int main(int argc,char *argv[])
 		fprintf(stdout, "signal error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
 		exit(-1);
 	}
-	
+
 	Startup_LogServer(&LogMqServer);
 	
-	StartLoadSever(&LoadCtrl);
+	Startup_LoadSever(&LoadCtrl);
 	
 	server_sock = Startup(&port);
 	WriteLogtoFile(&LogMqServer,0,"INF httpd running on port %d\n", port);
-
+	
 	client_mgr[0].fd=server_sock;
 	client_mgr[0].LastMtime=time(NULL);
 
 	while (1)
 	{
 		UpdateSelect(&connect_mgr);
-		switch(select((connect_mgr.Maxfdp)+1,&(connect_mgr.Readfds),NULL,NULL,NULL))
+		switch(select((connect_mgr.Maxfdp)+1,&(connect_mgr.Readfds),NULL,NULL,&(connect_mgr.Timeout)))
 		{ 
 			case -1: 
-				exit(-1);
+				raise(SIGINT);
 				break;
 			case 0:
+				TimeOutDeal(&connect_mgr);
 				break;
 			default: 
 				CheckSelect(&connect_mgr);
 		}
 	}
-	
 	WriteLogtoFile(&LogMqServer,1,"INF httpd server stop!\n");
-	
 	close(server_sock);
-
 	return(0);
 }
 
