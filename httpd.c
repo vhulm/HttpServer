@@ -567,11 +567,18 @@ int Execute_CGI(RESPONSE_MSG *request)
 		execl(request->Path, request->Path, NULL);
 		exit(0);
 	} else 
-	{    /* parent */
+	{   
+		char ChunkBuf[270]={0};
+		int len=0;
+		/* parent */
 		close(cgi_output[1]);
 		close(cgi_input[0]);
 		
-		sprintf(buf, "HTTP/1.0 200 OK CGI\r\n");
+		sprintf(buf, "HTTP/1.1 200 OK CGI\r\n");
+		send(request->ClientSocket, buf, strlen(buf), 0);
+		sprintf(buf, "Content-Type: text/html\r\n");
+		send(request->ClientSocket, buf, strlen(buf), 0);
+		sprintf(buf, "Transfer-Encoding: chunked\r\n");
 		send(request->ClientSocket, buf, strlen(buf), 0);
 		sprintf(buf, "\r\n");
 		send(request->ClientSocket, buf, strlen(buf), 0);
@@ -584,10 +591,25 @@ int Execute_CGI(RESPONSE_MSG *request)
 				write(cgi_input[1], &c, 1);
 			}
 		}
-		while (read(cgi_output[0], &c, 1) > 0)
+		//Transfer-Encoding: chunked
+		while ((len=read(cgi_output[0], ChunkBuf+4, 0x14)) > 0)
 		{
-			send(request->ClientSocket, &c, 1, 0);
+			char ch;
+			ch=ChunkBuf[4];
+			sprintf(ChunkBuf,"%02x\r\n",len);
+			ChunkBuf[4]=ch;
+			ChunkBuf[4+len]='\r';
+			ChunkBuf[5+len]='\n';
+			send(request->ClientSocket, ChunkBuf,len+6, 0);
 		}
+		
+		ChunkBuf[0]=0x30;
+		ChunkBuf[1]='\r';
+		ChunkBuf[2]='\n';
+		ChunkBuf[3]='\r';
+		ChunkBuf[4]='\n';
+		send(request->ClientSocket, ChunkBuf, 5, 0);
+		
 		close(cgi_output[0]);
 		close(cgi_input[1]);
 		waitpid(pid, &status, 0);
@@ -915,6 +937,8 @@ int Startup_LoadSever(LOAD_TYPE *load)
 		WriteLogtoFile(&LogMqServer,0,"INF The server to start to fail!\n");
 		exit(-1);
 	}
+
+
 	ret=semctl(load->SemID,0,SETVAL,load->Arg);
 	if(ret ==-1)
 	{
@@ -1241,7 +1265,7 @@ int main(int argc,char *argv[])
 {
 	int ch; 
 	opterr = 0;
-
+	
 	int server_sock = -1;
 	u_short port = 8855;
 	
@@ -1277,12 +1301,12 @@ int main(int argc,char *argv[])
 	}
 
 	Startup_LogServer(&LogMqServer);
-	
+
 	Startup_LoadSever(&LoadCtrl);
-	
+
 	server_sock = Startup(&port);
 	WriteLogtoFile(&LogMqServer,0,"INF httpd running on port %d\n", port);
-	
+
 	client_mgr[0].fd=server_sock;
 	client_mgr[0].LastMtime=time(NULL);
 
