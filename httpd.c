@@ -26,9 +26,9 @@
 #define MAXBUFSIZE	(4096)
 
 //#define ACCESS_CHECKING_ENABLE
-#define ALLOW_MAX_CONNECTION (20)
+#define ALLOW_MAX_CONNECTION (15)
 #define FIRE_IP "192.168.*.1-180"
-#define MAX_CLINET_MGR_NUM (ALLOW_MAX_CONNECTION+1+9)
+#define MAX_CLINET_MGR_NUM (ALLOW_MAX_CONNECTION+1+14)
 
 
 typedef struct
@@ -110,7 +110,7 @@ typedef struct
 	union semun Arg;
 }LOAD_TYPE; 
 
-LOAD_TYPE LoadCtrl={.MaxContion=ALLOW_MAX_CONNECTION};
+LOAD_TYPE LoadCtrl={.MaxContion=MAX_CLINET_MGR_NUM};
 
 /*
 *	ConnectState =   2  //请求加入select监控	已经设置好fd和WaitTime（有效）
@@ -150,7 +150,7 @@ typedef struct
 	LOAD_TYPE *pt_LoadCtrl;
 }ST_CONNECT_MGR;
 
-ST_CONNECT_MGR connect_mgr={.Timeout={5,0},.pt_CilenMgr=client_mgr,.pt_LoadCtrl=&LoadCtrl};
+ST_CONNECT_MGR connect_mgr={.Timeout={1,0},.pt_CilenMgr=client_mgr,.pt_LoadCtrl=&LoadCtrl};
 
 extern int errno;
 
@@ -302,7 +302,7 @@ void *Deal_Request(void *psocket)
 int LoadControl(int client,RESPONSE_MSG *request,LOAD_TYPE *load)
 {
 	request->ClientSocket=client;
-	if(Get_ConnectionNum(load)<=0)
+	if(Get_ConnectionNum(load)>ALLOW_MAX_CONNECTION)
 	{
 		request->ErrorCode=-1;
 		request->StaticMsg.StatusCode=503;//The file is not found
@@ -579,19 +579,34 @@ int Execute_CGI(RESPONSE_MSG *request)
 		close(cgi_input[0]);
 		
 		sprintf(buf, "HTTP/1.1 200 OK CGI\r\n");
-		send(request->ClientSocket, buf, strlen(buf), 0);
+		if(send(request->ClientSocket, buf, strlen(buf), MSG_NOSIGNAL)==-1)
+		{
+			return -1;
+		}
 		sprintf(buf, "Content-Type: text/html\r\n");
-		send(request->ClientSocket, buf, strlen(buf), 0);
+		if(send(request->ClientSocket, buf, strlen(buf), MSG_NOSIGNAL)==-1)
+		{
+			return -1;
+		}
 		sprintf(buf, "Transfer-Encoding: chunked\r\n");
-		send(request->ClientSocket, buf, strlen(buf), 0);
+		if(send(request->ClientSocket, buf, strlen(buf), MSG_NOSIGNAL)==-1)
+		{
+			return -1;
+		}
 		sprintf(buf, "\r\n");
-		send(request->ClientSocket, buf, strlen(buf), 0);
+		if(send(request->ClientSocket, buf, strlen(buf), MSG_NOSIGNAL)==-1)
+		{
+			return -1;
+		}
 		
 		if (strcasecmp(request->Method, "POST") == 0)
 		{
 			for (i = 0; i < request->Content_Length; i++)
 			{
-				recv(request->ClientSocket, &c, 1, 0);
+				if(recv(request->ClientSocket, &c, 1, 0)==-1)
+				{
+					return -1;
+				}
 				write(cgi_input[1], &c, 1);
 			}
 		}
@@ -604,7 +619,10 @@ int Execute_CGI(RESPONSE_MSG *request)
 			ChunkBuf[4]=ch;
 			ChunkBuf[4+len]='\r';
 			ChunkBuf[5+len]='\n';
-			send(request->ClientSocket, ChunkBuf,len+6, 0);
+			if(send(request->ClientSocket, ChunkBuf,len+6, MSG_NOSIGNAL)==-1)
+			{
+				return -1;
+			}
 		}
 		
 		ChunkBuf[0]=0x30;
@@ -612,7 +630,10 @@ int Execute_CGI(RESPONSE_MSG *request)
 		ChunkBuf[2]='\n';
 		ChunkBuf[3]='\r';
 		ChunkBuf[4]='\n';
-		send(request->ClientSocket, ChunkBuf, 5, 0);
+		if(send(request->ClientSocket, ChunkBuf, 5, MSG_NOSIGNAL)==-1)
+		{
+			return -1;
+		}
 		
 		close(cgi_output[0]);
 		close(cgi_input[1]);
@@ -665,7 +686,10 @@ int Send_ResponseLineToClient(int client,int statusCode,const char *des)
 		return -1;
 	}
 	sprintf(buf, "HTTP/1.0 %d %s\r\n",statusCode,des);
-	send(client, buf, strlen(buf), 0);
+	if(send(client, buf, strlen(buf), MSG_NOSIGNAL)==-1)
+	{
+		return -1;
+	}
 	return 0;
 }
 
@@ -683,13 +707,19 @@ int Send_ResponseHeadToClient(int client,const char *headName,const char *value)
 	{
 		sprintf(buf, "%s: %s\r\n",headName,value);
 	}
-	send(client, buf, strlen(buf), 0);
+	if(send(client, buf, strlen(buf), MSG_NOSIGNAL)==-1)
+	{
+		return -1;
+	}
 	return 0;
 }
 
 int Send_ResponseBlankLineToClient(int client)
 {
-	send(client, "\r\n", 2, 0);
+	if(send(client, "\r\n", 2, MSG_NOSIGNAL)==-1)
+	{
+		return -1;
+	}
 	return 0;
 }
 
@@ -705,7 +735,10 @@ int Send_ResponseBodyToClient(int client,const char *path)
 	}
 	while((n=read(fd,buf,MAXBUFSIZE))!=0)
 	{
-		send(client, buf, n, 0);
+		if(send(client, buf, n, MSG_NOSIGNAL)==-1)
+		{
+			return -1;
+		}
 	}
 	close(fd);
 	return 0;
@@ -738,9 +771,16 @@ int Get_Line(int sock, char *buf, int size)
 			if (c == '\r')
 			{
 				n = recv(sock, &c, 1, MSG_PEEK);
+				if(n==-1)
+				{
+					return -1;
+				}
 				if ((n > 0) && (c == '\n'))
 				{
-					recv(sock, &c, 1, 0);
+					if(recv(sock, &c, 1, 0)==-1)
+					{
+						return -1;
+					}
 				}
 				else
 				{
@@ -963,8 +1003,7 @@ int Get_ConnectionNum(LOAD_TYPE *load)
 		raise(SIGINT);
 	}
 	printf("Load %d\n",(load->MaxContion)-val);
-	fflush(stdout);
-	return val;
+	return ((load->MaxContion)-val);
 }
 
 int ConnectionDel(LOAD_TYPE *load)
@@ -974,6 +1013,7 @@ int ConnectionDel(LOAD_TYPE *load)
 	load->Opt.sem_op=1;
 	load->Opt.sem_flg=0;
 	printf("del\n");
+	Get_ConnectionNum(load);
 	ret=semop(load->SemID,&(load->Opt),1);
 	if(ret==-1)
 	{
@@ -990,7 +1030,7 @@ int ConnectionGet(LOAD_TYPE *load)
 	load->Opt.sem_op=-1;
 	load->Opt.sem_flg=0;
 	printf("get\n");
-
+	Get_ConnectionNum(load);
 	ret=semop(load->SemID,&(load->Opt),1);
 	if(ret==-1)
 	{
@@ -1213,8 +1253,14 @@ int CheckSelect(ST_CONNECT_MGR *pt_connect)
 			WriteLogtoFile(&LogMqServer,errno,"SYS accept_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 		}else
 		{
-			AddSelect(pt_connect,client_sock,30);
-			ConnectionGet(pt_connect->pt_LoadCtrl);
+			if(Get_ConnectionNum(&LoadCtrl)>ALLOW_MAX_CONNECTION+5)
+			{
+				close(client_sock);
+			}else
+			{
+				AddSelect(pt_connect,client_sock,10);
+				ConnectionGet(pt_connect->pt_LoadCtrl);
+			}
 		}
 	}
 	for(i=1;i<MAX_CLINET_MGR_NUM;i++)
@@ -1278,23 +1324,24 @@ int main(int argc,char *argv[])
 	u_short port = 8855;
 	
 	while ((ch = getopt(argc,argv,"p:"))!=-1)
-	{  
+	{ 
 		switch(ch)  
 		{  
 			case 'p':
 				port=atoi(optarg);  
-				break;   
+				break;
 			default: 
 				if(optopt=='p')
 				{
 					printf("Usage %s -p <port>\n",argv[0]);
 				}else
 				{
-					printf("Unknown option %c\n",optopt);
+					printf("Unknown option -%c\n",optopt);
 				}
 				exit(-1);
 		}
-	} 
+	}
+		
 	#ifdef ACCESS_CHECKING_ENABLE
 		if(IPMatch("192.168.1.1")<0)
 		{
