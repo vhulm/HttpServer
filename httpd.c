@@ -327,6 +327,7 @@ int AccessChecking(RESPONSE_MSG *request)
 	}else
 	{
 		WriteLogtoFile(&LogMqServer,errno,"SYS Failed to get the customer IP in file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+		return -2;
 	}
 	if(IPMatch(request->ClientIP)==1)
 	{
@@ -466,6 +467,8 @@ int CheckRequest(RESPONSE_MSG *request)
 	{
 		request->ErrorCode=-1;
 		request->StaticMsg.StatusCode=404;//The file is not found
+		ResponseError(request);
+		return -1;
 	}
 	else
 	{
