@@ -140,6 +140,7 @@ ST_CLIENT_MGR client_mgr[MAX_CLINET_MGR_NUM]={	{-1, 1,-1,-1},{-1,-2,0,30},{-1,-2
 												};
 
 
+
 typedef struct
 {
 	int Maxfdp;
@@ -149,7 +150,7 @@ typedef struct
 	LOAD_TYPE *pt_LoadCtrl;
 }ST_CONNECT_MGR;
 
-ST_CONNECT_MGR connect_mgr={.Timeout={1,0},.pt_CilenMgr=client_mgr,.pt_LoadCtrl=&LoadCtrl};
+ST_CONNECT_MGR connect_mgr={.Timeout={5,0},.pt_CilenMgr=client_mgr,.pt_LoadCtrl=&LoadCtrl};
 
 extern int errno;
 
@@ -1105,6 +1106,10 @@ int UpdateSelect(ST_CONNECT_MGR *pt_connect)
 	int i=0;
 	ST_CLIENT_MGR *pt_cli=NULL;
 	pt_connect->Maxfdp=0;
+	
+	pt_connect->Timeout.tv_sec=5;
+	pt_connect->Timeout.tv_usec=0;
+	
 	FD_ZERO(&(pt_connect->Readfds));
 	for(i=0;i<MAX_CLINET_MGR_NUM;i++)
 	{
