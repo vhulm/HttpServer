@@ -66,6 +66,13 @@ typedef struct
 #define ISCGI_FILE(type)  ((type)!=(0))
 #define ISspace(x)	(isspace((int)(x)))
 
+#define RET_CHECK(ret) \
+		do{ \
+			if((ret)==-1) \
+			{ \
+				return -1; \
+			} \
+		}while(0)
 
 typedef struct
 {
@@ -127,19 +134,7 @@ typedef struct
 	int WaitTime;
 }ST_CLIENT_MGR;
 
-ST_CLIENT_MGR client_mgr[MAX_CLINET_MGR_NUM]={	{-1, 1,-1,-1},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
-												{-1,-2, 0,30},{-1,-2,0,30},{-1,-2,0,30},
-												};
-
-
+ST_CLIENT_MGR client_mgr[MAX_CLINET_MGR_NUM]={	{-1, 1,-1,-1},{-1,-2,0,30}};
 
 typedef struct
 {
@@ -194,6 +189,7 @@ void Log_ServerThread(union sigval LogServerID);
 int WriteLogtoFile(LOG_SERVER *LogServerID,int err,const char *fmt,...);
 
 
+int Startup_ConnectMgrServr(ST_CONNECT_MGR *pt_connect,int server_sock);
 int UpdateSelect(ST_CONNECT_MGR *pt_connect);
 int AddSelect(ST_CONNECT_MGR *pt_connect,int client_sock,int timeout);
 int QuryDelSelect(ST_CONNECT_MGR *pt_connect,int client_sock);
@@ -323,11 +319,11 @@ int AccessChecking(RESPONSE_MSG *request)
 	if (getpeername(request->ClientSocket,(struct sockaddr *)&peeraddr, &namelen) != -1)
 	{
 		sprintf(request->ClientIP,"%s",(char *)inet_ntoa(peeraddr.sin_addr));
-		//WriteLogtoFile(&LogMqServer,2,"INF Client IP:%s\n",request->ClientIP);
+		WriteLogtoFile(&LogMqServer,2,"INF Client IP:%s\n",request->ClientIP);
 	}else
 	{
 		WriteLogtoFile(&LogMqServer,errno,"SYS Failed to get the customer IP in file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
-		return -2;
+		return -1;
 	}
 	if(IPMatch(request->ClientIP)==1)
 	{
@@ -360,7 +356,7 @@ int ParseRequest(RESPONSE_MSG *request)
 	numchars=Get_Line(request->ClientSocket,buf,MAXBUFSIZE);
 	if(numchars==-1)
 	{
-		return -3;
+		return -1;
 	}
 	i = 0; j = 0;
 	while (!ISspace(buf[j]) && (i < sizeof(request->Method) - 1))
@@ -374,7 +370,7 @@ int ParseRequest(RESPONSE_MSG *request)
 	{
 		request->ErrorCode=-1;
 		request->StaticMsg.StatusCode=404;//Does not support method
-		return -2;
+		return -1;
 	}
 	if (strcasecmp(request->Method, "POST") == 0)
 	{
@@ -422,7 +418,7 @@ int ParseRequest(RESPONSE_MSG *request)
 			numchars= Get_Line(request->ClientSocket, buf, sizeof(buf));
 			if(numchars==-1)
 			{
-				return -3;
+				return -1;
 			}
 		}
 	}
@@ -431,7 +427,7 @@ int ParseRequest(RESPONSE_MSG *request)
 		numchars = Get_Line(request->ClientSocket, buf, sizeof(buf));
 		if(numchars==-1)
 		{
-			return -3;
+			return -1;
 		}
 		while ((numchars > 0) && strcmp("\n", buf))
 		{
@@ -443,7 +439,7 @@ int ParseRequest(RESPONSE_MSG *request)
 			numchars = Get_Line(request->ClientSocket, buf, sizeof(buf));
 			if(numchars==-1)
 			{
-				return -3;
+				return -1;
 			}
 		}
 		if (request->Content_Length == -1) 
@@ -461,13 +457,14 @@ int CheckRequest(RESPONSE_MSG *request)
 	/*
 	检查文件访问权限，文件长度，如果是静态文件返回文件描述符
 	*/
-
+	int ret=0;
 	struct stat st;
 	if (stat(request->Path, &st) == -1) 
 	{
 		request->ErrorCode=-1;
 		request->StaticMsg.StatusCode=404;//The file is not found
-		ResponseError(request);
+		ret=ResponseError(request);
+		RET_CHECK(ret);
 		return -1;
 	}
 	else
@@ -483,7 +480,8 @@ int CheckRequest(RESPONSE_MSG *request)
 		}else
 		{
 			request->StaticMsg.ContentLength=st.st_size;
-			Get_ImageFileType(request);
+			ret=Get_ImageFileType(request);
+			RET_CHECK(ret);
 		}
 		if ((st.st_mode & S_IXUSR) ||(st.st_mode & S_IXGRP) ||(st.st_mode & S_IXOTH))
 		{
@@ -495,20 +493,24 @@ int CheckRequest(RESPONSE_MSG *request)
 }
 
 int ResponseClient(RESPONSE_MSG *request)
-{	
+{
+	int ret=0;
 	if(RESPONSE_NO_ERROR(request->ErrorCode))
 	{
 		if(ISCGI_FILE(request->ParseState))//CGI FILE
 		{
-			Execute_CGI(request);
+			ret=Execute_CGI(request);
+			RET_CHECK(ret);
 		}else//TEXT FILE
 		{
 			request->StaticMsg.StatusCode=200;
-			ResponseStaticFiles(request); 
+			ret=ResponseStaticFiles(request);
+			RET_CHECK(ret);
 		}
 	}else
 	{
-		ResponseError(request);
+		ret=ResponseError(request);
+		RET_CHECK(ret);
 	}
 	return 0;
 }
@@ -581,21 +583,25 @@ int Execute_CGI(RESPONSE_MSG *request)
 		sprintf(buf, "HTTP/1.1 200 OK CGI\r\n");
 		if(send(request->ClientSocket, buf, strlen(buf), MSG_NOSIGNAL)==-1)
 		{
+			WriteLogtoFile(&LogMqServer,errno,"SYS send Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 			return -1;
 		}
 		sprintf(buf, "Content-Type: text/html\r\n");
 		if(send(request->ClientSocket, buf, strlen(buf), MSG_NOSIGNAL)==-1)
 		{
+			WriteLogtoFile(&LogMqServer,errno,"SYS send Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 			return -1;
 		}
 		sprintf(buf, "Transfer-Encoding: chunked\r\n");
 		if(send(request->ClientSocket, buf, strlen(buf), MSG_NOSIGNAL)==-1)
 		{
+			WriteLogtoFile(&LogMqServer,errno,"SYS send Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 			return -1;
 		}
 		sprintf(buf, "\r\n");
 		if(send(request->ClientSocket, buf, strlen(buf), MSG_NOSIGNAL)==-1)
 		{
+			WriteLogtoFile(&LogMqServer,errno,"SYS send Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 			return -1;
 		}
 		
@@ -621,6 +627,7 @@ int Execute_CGI(RESPONSE_MSG *request)
 			ChunkBuf[5+len]='\n';
 			if(send(request->ClientSocket, ChunkBuf,len+6, MSG_NOSIGNAL)==-1)
 			{
+				WriteLogtoFile(&LogMqServer,errno,"SYS send Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 				return -1;
 			}
 		}
@@ -632,6 +639,7 @@ int Execute_CGI(RESPONSE_MSG *request)
 		ChunkBuf[4]='\n';
 		if(send(request->ClientSocket, ChunkBuf, 5, MSG_NOSIGNAL)==-1)
 		{
+			WriteLogtoFile(&LogMqServer,errno,"SYS send Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 			return -1;
 		}
 		
@@ -645,21 +653,29 @@ int Execute_CGI(RESPONSE_MSG *request)
 
 int ResponseStaticFiles(RESPONSE_MSG *request) 
 {
+	int ret=0;
 	char buf[MAXBUFSIZE];
 	int StatusCode=request->StaticMsg.StatusCode;
-	Send_ResponseLineToClient(request->ClientSocket,StatusCode,Get_ErrorDes(StatusCode));
-	Send_ResponseHeadToClient(request->ClientSocket,"Content-Type",request->StaticMsg.ContentType);
+	ret=Send_ResponseLineToClient(request->ClientSocket,StatusCode,Get_ErrorDes(StatusCode));
+	RET_CHECK(ret);
+	ret=Send_ResponseHeadToClient(request->ClientSocket,"Content-Type",request->StaticMsg.ContentType);
+	RET_CHECK(ret);
 	sprintf(buf,"%ld",request->StaticMsg.ContentLength);
-	Send_ResponseHeadToClient(request->ClientSocket,"Content-Length",buf);
-	Send_ResponseHeadToClient(request->ClientSocket,"Connection","keep-alive");
-	Send_ResponseBlankLineToClient(request->ClientSocket);
-	Send_ResponseBodyToClient(request->ClientSocket,request->Path);
+	ret=Send_ResponseHeadToClient(request->ClientSocket,"Content-Length",buf);
+	RET_CHECK(ret);
+	ret=Send_ResponseHeadToClient(request->ClientSocket,"Connection","keep-alive");
+	RET_CHECK(ret);
+	ret=Send_ResponseBlankLineToClient(request->ClientSocket);
+	RET_CHECK(ret);
+	ret=Send_ResponseBodyToClient(request->ClientSocket,request->Path);
+	RET_CHECK(ret);
 	return 0;
 }
 
 
 int ResponseError(RESPONSE_MSG *request) 
 {
+	int ret=0;
 	char buf[MAXBUFSIZE];
 	struct stat st;
 	int StatusCode=request->StaticMsg.StatusCode;
@@ -667,13 +683,19 @@ int ResponseError(RESPONSE_MSG *request)
 	{
 		request->StaticMsg.ContentLength=st.st_size+2;
 	}
-	Send_ResponseLineToClient(request->ClientSocket,StatusCode,Get_ErrorDes(StatusCode));
-	Send_ResponseHeadToClient(request->ClientSocket,"Content-Type",request->StaticMsg.ContentType);
+	ret=Send_ResponseLineToClient(request->ClientSocket,StatusCode,Get_ErrorDes(StatusCode));
+	RET_CHECK(ret);
+	ret=Send_ResponseHeadToClient(request->ClientSocket,"Content-Type",request->StaticMsg.ContentType);
+	RET_CHECK(ret);
 	sprintf(buf,"%ld",request->StaticMsg.ContentLength);
-	Send_ResponseHeadToClient(request->ClientSocket,"Content-Length",buf);
-	Send_ResponseHeadToClient(request->ClientSocket,"Connection","keep-alive");
-	Send_ResponseBlankLineToClient(request->ClientSocket);
-	Send_ResponseBodyToClient(request->ClientSocket,Get_ErrorFileFd(StatusCode));
+	ret=Send_ResponseHeadToClient(request->ClientSocket,"Content-Length",buf);
+	RET_CHECK(ret);
+	ret=Send_ResponseHeadToClient(request->ClientSocket,"Connection","keep-alive");
+	RET_CHECK(ret);
+	ret=Send_ResponseBlankLineToClient(request->ClientSocket);
+	RET_CHECK(ret);
+	ret=Send_ResponseBodyToClient(request->ClientSocket,Get_ErrorFileFd(StatusCode));
+	RET_CHECK(ret);
 	WriteLogtoFile(&LogMqServer,StatusCode,"PARE ResponseError Eorror %s\n",Get_ErrorDes(StatusCode));
 	return 0;
 }
@@ -688,6 +710,7 @@ int Send_ResponseLineToClient(int client,int statusCode,const char *des)
 	sprintf(buf, "HTTP/1.0 %d %s\r\n",statusCode,des);
 	if(send(client, buf, strlen(buf), MSG_NOSIGNAL)==-1)
 	{
+		WriteLogtoFile(&LogMqServer,errno,"SYS send Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 		return -1;
 	}
 	return 0;
@@ -709,6 +732,7 @@ int Send_ResponseHeadToClient(int client,const char *headName,const char *value)
 	}
 	if(send(client, buf, strlen(buf), MSG_NOSIGNAL)==-1)
 	{
+		WriteLogtoFile(&LogMqServer,errno,"SYS send Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 		return -1;
 	}
 	return 0;
@@ -718,6 +742,7 @@ int Send_ResponseBlankLineToClient(int client)
 {
 	if(send(client, "\r\n", 2, MSG_NOSIGNAL)==-1)
 	{
+		WriteLogtoFile(&LogMqServer,errno,"SYS send Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 		return -1;
 	}
 	return 0;
@@ -737,6 +762,7 @@ int Send_ResponseBodyToClient(int client,const char *path)
 	{
 		if(send(client, buf, n, MSG_NOSIGNAL)==-1)
 		{
+			WriteLogtoFile(&LogMqServer,errno,"SYS send Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 			return -1;
 		}
 	}
@@ -988,7 +1014,7 @@ int Startup_LoadSever(LOAD_TYPE *load)
 	{
 		WriteLogtoFile(&LogMqServer,errno,"SYS semctl error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 		WriteLogtoFile(&LogMqServer,0,"INF The server to start to fail!\n");
-		exit(-1);
+		raise(SIGINT);
 	}
 	return 0;
 }
@@ -1043,19 +1069,29 @@ int ConnectionGet(LOAD_TYPE *load)
 
 int Startup_LogServer(LOG_SERVER *LogServerID)
 {
+	int ret=0;
 	if((LogServerID->LogMqd = mq_open(LogServerID->MqDir,O_CREAT |O_RDWR,0666,NULL))==(mqd_t)-1)
 	{
 		fprintf(stdout, "mq_open error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
 		exit(-1);
 	}
-	mq_getattr(LogServerID->LogMqd,&(LogServerID->MqAttr));
-
+	ret=mq_getattr(LogServerID->LogMqd,&(LogServerID->MqAttr));
+	if(ret==-1)
+	{
+		fprintf(stdout, "mq_getattr error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		mq_unlink(LogServerID->MqDir);
+		exit(-1);
+	}
 	LogServerID->SigEnv.sigev_notify = SIGEV_THREAD;
 	LogServerID->SigEnv.sigev_value.sival_ptr = LogServerID;
 	LogServerID->SigEnv.sigev_notify_function = Log_ServerThread;
 	LogServerID->SigEnv.sigev_notify_attributes = NULL;
 
-	Register_logThread(&LogMqServer);
+	if(Register_logThread(&LogMqServer)==-1)
+	{
+		mq_unlink(LogServerID->MqDir);
+		exit(-1);
+	}
 	return 0;
 }
 int Register_logThread(LOG_SERVER *LogServerID)
@@ -1063,7 +1099,7 @@ int Register_logThread(LOG_SERVER *LogServerID)
 	if(mq_notify(LogServerID->LogMqd,&(LogServerID->SigEnv)) == -1)
 	{
 		fprintf(stdout, "mq_notify error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
-		raise(SIGINT);
+		return -1;
 	}
 	return 0;
 }
@@ -1074,12 +1110,17 @@ void Log_ServerThread(union sigval LogServerID)
 	unsigned  prio;
 	int fd;
 	int n=0;
-	Register_logThread(((LOG_SERVER *)(LogServerID.sival_ptr)));
+	if(Register_logThread(((LOG_SERVER *)(LogServerID.sival_ptr)))==-1)
+	{
+		fprintf(stdout, "Register_logThread error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		raise(SIGINT);
+	}
 	//相关处理
 	fd=open(((LOG_SERVER *)(LogServerID.sival_ptr))->LogFileDir ,O_WRONLY|O_APPEND|O_CREAT,755);
 	if(fd==-1)
 	{
-		return;
+		fprintf(stdout, "mq_receive error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		raise(SIGINT);
 	}
 
 	do
@@ -1127,7 +1168,6 @@ int WriteLogtoFile(LOG_SERVER *LogServerID,int err,const char *fmt,...)
 	if(mq_send(LogServerID->LogMqd,(char *)buf,strlen(buf)+1,prio)<0)
 	{
 		fprintf(stdout, "mq_open error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
-
 	}
 	va_end(ap);
 	return 0;
@@ -1142,6 +1182,18 @@ void QuitSignal(int sig)
 		printf("HttpServer Service to stop\n");
 		exit(-1);
 	}
+}
+
+int Startup_ConnectMgrServr(ST_CONNECT_MGR *pt_connect,int server_sock)
+{
+	int i=0;
+	pt_connect->pt_CilenMgr->fd=server_sock;
+	pt_connect->pt_CilenMgr->LastMtime=time(NULL);
+	for(i=2;i<MAX_CLINET_MGR_NUM;i++)
+	{
+		memcpy((void *)((pt_connect->pt_CilenMgr)+i), (void *)((pt_connect->pt_CilenMgr)+1), sizeof(ST_CLIENT_MGR));
+	}
+	return 0;
 }
 
 int UpdateSelect(ST_CONNECT_MGR *pt_connect)
@@ -1258,7 +1310,7 @@ int CheckSelect(ST_CONNECT_MGR *pt_connect)
 				close(client_sock);
 			}else
 			{
-				AddSelect(pt_connect,client_sock,10);
+				AddSelect(pt_connect,client_sock,20);
 				ConnectionGet(pt_connect->pt_LoadCtrl);
 			}
 		}
@@ -1277,7 +1329,7 @@ int CheckSelect(ST_CONNECT_MGR *pt_connect)
 				}
 				pt_cli->ConnectState=0;
 				pt_cli->LastMtime=CurTime;
-				pt_cli->WaitTime=3;
+				pt_cli->WaitTime=20;
 			}else if((CurTime-(pt_cli->LastMtime))>(pt_cli->WaitTime))
 			{
 				printf("time out\n");
@@ -1333,10 +1385,10 @@ int main(int argc,char *argv[])
 			default: 
 				if(optopt=='p')
 				{
-					printf("Usage %s -p <port>\n",argv[0]);
+					fprintf(stdout,"Usage %s -p <port>\n",argv[0]);
 				}else
 				{
-					printf("Unknown option -%c\n",optopt);
+					fprintf(stdout,"Unknown option -%c\n",optopt);
 				}
 				exit(-1);
 		}
@@ -1360,12 +1412,12 @@ int main(int argc,char *argv[])
 	Startup_LoadSever(&LoadCtrl);
 
 	server_sock = Startup(&port);
+
+	Startup_ConnectMgrServr(&connect_mgr,server_sock);
+	
 	WriteLogtoFile(&LogMqServer,0,"INF httpd running on port %d\n", port);
 
-	client_mgr[0].fd=server_sock;
-	client_mgr[0].LastMtime=time(NULL);
-
-	while (1)
+	for(;;)
 	{
 		UpdateSelect(&connect_mgr);
 		switch(select((connect_mgr.Maxfdp)+1,&(connect_mgr.Readfds),NULL,NULL,&(connect_mgr.Timeout)))
