@@ -129,12 +129,12 @@ LOAD_TYPE LoadCtrl={.MaxContion=MAX_CLINET_MGR_NUM};
 typedef struct
 {
 	int fd;	//-1 连接已经被销毁
-	int ConnectState; 
-	time_t LastMtime;
-	int WaitTime;
+	volatile int ConnectState; 
+	volatile time_t LastMtime;
+	volatile int WaitTime;
 }ST_CLIENT_MGR;
 
-ST_CLIENT_MGR client_mgr[MAX_CLINET_MGR_NUM]={	{-1, 1,-1,-1},{-1,-2,0,30}};
+ST_CLIENT_MGR ClientMgr[MAX_CLINET_MGR_NUM]={	{-1, 1,-1,-1},{-1,-2,0,30}};
 
 typedef struct
 {
@@ -145,7 +145,51 @@ typedef struct
 	LOAD_TYPE *pt_LoadCtrl;
 }ST_CONNECT_MGR;
 
-ST_CONNECT_MGR connect_mgr={.Timeout={1,0},.pt_CilenMgr=client_mgr,.pt_LoadCtrl=&LoadCtrl};
+ST_CONNECT_MGR ConnectMgr={.Timeout={1,0},.pt_CilenMgr=ClientMgr,.pt_LoadCtrl=&LoadCtrl};
+
+typedef struct
+{
+	const char *MqDir;
+	mqd_t MqId;
+	struct mq_attr  MqAttr;
+}ST_JOB_QUEUE;
+
+typedef struct
+{
+	pthread_cond_t Count;			//条件变量用来唤醒线程池中的线程
+	pthread_mutex_t CountMutex;     //互斥信号量For 条件变量
+	struct timespec CountTimeOut;
+}ST_COUNT_VAR;
+
+typedef struct
+{
+pthread_t Pid;
+pthread_attr_t Attr;
+}ST_PTHREAD;
+
+typedef struct
+{
+	pthread_mutex_t Mutex;          //互斥信号量
+	int MaxThread_Num;              //线程池允许最多线程数
+	int MinThread_Num;              //线程池允许最少线程数
+	volatile int CurThread_Num;              //线程池当前线程数
+	volatile int CurJob_Num;					//当前队列任务数
+	volatile int CurLoadState;				//当前任务负载(根据此值确定是否需要增加线程)
+
+	ST_JOB_QUEUE JobQueue;			//任务队列
+	ST_COUNT_VAR CountVar;
+	ST_PTHREAD Pthread;
+}ST_THREAD_POOL;
+
+ST_THREAD_POOL ThreadPoolObj={	.Mutex=PTHREAD_MUTEX_INITIALIZER, \
+								.MaxThread_Num=30, \
+								.MinThread_Num=5, \
+								.CurThread_Num=0, \
+								.CurJob_Num=0, \
+								.CurLoadState=0, \
+								.JobQueue={.MqDir="/ThreadPoolMq"}, \
+								.CountVar={.Count=PTHREAD_COND_INITIALIZER,.CountMutex=PTHREAD_MUTEX_INITIALIZER,.CountTimeOut={.tv_sec=(time_t)20,.tv_nsec=0L}},
+								};
 
 extern int errno;
 
@@ -196,6 +240,9 @@ int QuryDelSelect(ST_CONNECT_MGR *pt_connect,int client_sock);
 int ChangeClientSta(ST_CONNECT_MGR *pt_connect,int client_sock,int state,int timeout);
 int CheckSelect(ST_CONNECT_MGR *pt_connect);
 int TimeOutDeal(ST_CONNECT_MGR *pt_connect);
+
+int ThreadPool_Init(ST_THREAD_POOL *pool);
+void *ThreadPool(void *arg);
 
 
 /**********************************************************************/
@@ -263,34 +310,34 @@ void *Deal_Request(void *psocket)
 	memset(&msg_client,0,sizeof(msg_client));
 	if(LoadControl(client,&msg_client,&LoadCtrl)!=0)
 	{
-		QuryDelSelect(&connect_mgr,client);
+		QuryDelSelect(&ConnectMgr,client);
 		return (NULL);
 	}
 
 	if(AccessChecking(&msg_client)!=0)
 	{
 			
-		QuryDelSelect(&connect_mgr,client);
+		QuryDelSelect(&ConnectMgr,client);
 		return (NULL);
 	}
 	if(ParseRequest(&msg_client)!=0)
 	{
-		QuryDelSelect(&connect_mgr,client);
+		QuryDelSelect(&ConnectMgr,client);
 		return (NULL);
 	}
 	if(CheckRequest(&msg_client)!=0)
 	{
-		QuryDelSelect(&connect_mgr,client);
+		QuryDelSelect(&ConnectMgr,client);
 		return (NULL);	
 	}
 	if(ResponseClient(&msg_client)!=0)
 	{
-		QuryDelSelect(&connect_mgr,client);
+		QuryDelSelect(&ConnectMgr,client);
 		return (NULL);
 	}
 	WriteLogtoFile(&LogMqServer,9,"Method:%s URL:%s Path:%s QueryStr:%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.QueryStr);
 	msg_client.KeepLive=20;
-	ChangeClientSta(&connect_mgr,client,2,msg_client.KeepLive);
+	ChangeClientSta(&ConnectMgr,client,2,msg_client.KeepLive);
 
 	return ((void*)(NULL));
 }
@@ -1179,6 +1226,7 @@ void QuitSignal(int sig)
 	{
 		mq_unlink(LogMqServer.MqDir);
 		semctl(LoadCtrl.SemID,0,IPC_RMID,0);
+		pthread_cond_destroy(&(ThreadPoolObj.CountVar.Count));
 		printf("HttpServer Service to stop\n");
 		exit(-1);
 	}
@@ -1292,7 +1340,7 @@ int CheckSelect(ST_CONNECT_MGR *pt_connect)
 	int client_sock;
 	struct sockaddr_in client_name;
 	socklen_t client_name_len = sizeof(client_name);
-	pthread_t newthread;
+	unsigned prio=0;
 	ST_CLIENT_MGR *pt_cli=NULL;
 	pt_cli=((pt_connect->pt_CilenMgr)+i);
 	CurTime=time(NULL);
@@ -1318,15 +1366,33 @@ int CheckSelect(ST_CONNECT_MGR *pt_connect)
 	for(i=1;i<MAX_CLINET_MGR_NUM;i++)
 	{
 		pt_cli=((pt_connect->pt_CilenMgr)+i);
-		if((pt_cli->ConnectState)==1)	//处于连接监控
+		if((pt_cli->ConnectState)==1)	//处于连接监控状态
 		{
 			if((FD_ISSET(pt_cli->fd,&(pt_connect->Readfds))))
 			{
-				if (pthread_create(&newthread , NULL, Deal_Request, (void *)&(pt_cli->fd)) != 0)
+				/*if (pthread_create(&newthread , NULL, Deal_Request, (void *)&(pt_cli->fd)) != 0)
 				{
 					ConnectionDel(pt_connect->pt_LoadCtrl);
 					WriteLogtoFile(&LogMqServer,errno,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+				}*/
+				
+				/*检查是否是真正的请求看对方是否关闭*/
+
+				/*						do something						*/
+				
+				/*-------------------------------------------------------*/
+				
+				if(mq_send(ThreadPoolObj.JobQueue.MqId,(char *)&(pt_cli->fd),sizeof(int),prio)<0)/*发送Socket fd到任务队列*/
+				{
+					ConnectionDel(pt_connect->pt_LoadCtrl);
+					fprintf(stdout, "mq_open error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
 				}
+				pthread_mutex_lock(&(ThreadPoolObj.CountVar.CountMutex));/*锁住互斥量*/
+
+				pthread_cond_signal(&(ThreadPoolObj.CountVar.Count));/*条件改变，发送信号，唤醒线程池中的一个线程*/
+
+				pthread_mutex_unlock(&(ThreadPoolObj.CountVar.CountMutex));/*解锁互斥量*/
+				
 				pt_cli->ConnectState=0;
 				pt_cli->LastMtime=CurTime;
 				pt_cli->WaitTime=20;
@@ -1366,6 +1432,116 @@ int TimeOutDeal(ST_CONNECT_MGR *pt_connect)
 	return 0;
 }
 
+int ThreadPool_Init(ST_THREAD_POOL *pool)
+{
+	int ret=0;
+	if((pool->JobQueue.MqId= mq_open(pool->JobQueue.MqDir,O_CREAT |O_RDWR,0666,NULL))==(mqd_t)-1)
+	{
+		fprintf(stdout, "mq_open error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		exit(-1);
+	}
+	ret=mq_getattr(pool->JobQueue.MqId,&(pool->JobQueue.MqAttr));
+	if(ret==-1)
+	{
+		fprintf(stdout, "mq_getattr error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		mq_unlink(pool->JobQueue.MqDir);
+		exit(-1);
+	}
+	ret=pthread_cond_init(&(pool->CountVar.Count),NULL);
+	if(ret!=0)
+	{
+		fprintf(stdout, "pthread_cond_init error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		exit(-1);
+	}
+	
+	pthread_attr_init(&(pool->Pthread.Attr));
+	pthread_attr_setdetachstate(&(pool->Pthread.Attr), PTHREAD_CREATE_JOINABLE);
+	pthread_mutex_lock(&(pool->Mutex)); //lock
+	if (pthread_create(&(pool->Pthread.Pid), &(pool->Pthread.Attr), ThreadPool, (void *)pool) != 0)
+	{
+		WriteLogtoFile(&LogMqServer,errno,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+		raise(SIGINT);
+	}else
+	{
+		pool->CurThread_Num++;
+	}
+	pthread_mutex_unlock(&(pool->Mutex));//unlock
+	
+	return 0;
+}
+
+void *ThreadPool(void *arg)
+{
+	int ret;
+	unsigned  prio;
+	ST_THREAD_POOL *pool=(ST_THREAD_POOL *)arg;
+	char buf[sizeof(int)*3];
+	do
+	{
+		pthread_mutex_lock(&(pool->Mutex));  /*lock*/	
+		if(pool->CurThread_Num < pool->MinThread_Num)	/*线程池线程太少则增加线程*/
+		{
+			if (pthread_create(&(pool->Pthread.Pid), &(pool->Pthread.Attr), ThreadPool, (void *)pool) != 0)
+			{
+				WriteLogtoFile(&LogMqServer,errno,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+			}else
+			{
+				pool->CurThread_Num++;
+			}
+		}
+		pthread_mutex_unlock(&(pool->Mutex)); /*unlock*/
+
+		ret=mq_getattr(pool->JobQueue.MqId,&(pool->JobQueue.MqAttr));/*获取当前任务队列任务数*/
+		if(ret==-1)
+		{
+			fprintf(stdout, "mq_getattr error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+			//exit(-1);	/*------------------------------------------------*/
+		}else if(pool->JobQueue.MqAttr.mq_curmsgs>0)/*获取成功并且有新任务则取出执行*/
+		{
+			if((ret=mq_receive(pool->JobQueue.MqId,buf,pool->JobQueue.MqAttr.mq_msgsize,&prio))!=sizeof(int))
+			{
+				fprintf(stdout, "mq_receive error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+				raise(SIGINT);
+			}else
+			{
+				Deal_Request((void *)buf);/*处理连接请求*/
+			}
+			pthread_mutex_lock(&(pool->Mutex)); /*lock*/
+			if(pool->JobQueue.MqAttr.mq_curmsgs>pool->CurThread_Num)	/*如果当前任务较重则考虑增加线程*/
+			{
+				if(pool->CurThread_Num < pool->MaxThread_Num)/*当前线程数没有超过最大限制*/
+				{
+					if (pthread_create(&(pool->Pthread.Pid), &(pool->Pthread.Attr), ThreadPool, (void *)pool) != 0)
+					{
+						WriteLogtoFile(&LogMqServer,errno,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+					}else
+					{
+						pool->CurThread_Num++;
+					}
+				}
+			}
+			pthread_mutex_unlock(&(pool->Mutex)); /*unlock*/
+		}else if(pool->JobQueue.MqAttr.mq_curmsgs==0)
+		{
+			/*当前任务较轻则考虑删除线程*/
+			pthread_mutex_lock(&(pool->CountVar.CountMutex));/*锁住互斥量*/
+			ret=pthread_cond_timedwait(&(pool->CountVar.Count),&(pool->CountVar.CountMutex),&(pool->CountVar.CountTimeOut));
+			if(ret==ETIME)
+			{
+				pthread_mutex_unlock(&(pool->CountVar.CountMutex));/*解锁互斥量*/
+				pthread_mutex_lock(&(pool->Mutex)); /*lock*/
+				if(pool->CurThread_Num > pool->MinThread_Num)
+				{
+					return 0;
+				}
+				pthread_mutex_unlock(&(pool->Mutex)); /*unlock*/
+			}
+			pthread_mutex_unlock(&(pool->CountVar.CountMutex));/*解锁互斥量*/
+		}
+	}while(1);
+	return NULL;
+}
+
 
 int main(int argc,char *argv[])
 {
@@ -1375,7 +1551,7 @@ int main(int argc,char *argv[])
 	int server_sock = -1;
 	u_short port = 8855;
 	
-	while ((ch = getopt(argc,argv,"p:"))!=-1)
+	while ((ch = getopt(argc,argv,"p:"))!=-1)/*启动参数检查*/
 	{ 
 		switch(ch)  
 		{  
@@ -1395,41 +1571,43 @@ int main(int argc,char *argv[])
 	}
 		
 	#ifdef ACCESS_CHECKING_ENABLE
-		if(IPMatch("192.168.1.1")<0)
-		{
+		if(IPMatch("192.168.1.1")<0)/*如果启用了防火墙*/
+		{							/*则检查防火墙IP格式是否正确*/
 			fprintf(stdout, "FIRE_IP Invalid format error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
 			exit(-1);
 		}
 	#endif
-	if(signal(SIGINT,QuitSignal)==SIG_ERR)
+	if(signal(SIGINT,QuitSignal)==SIG_ERR)/*注册SIGINT 信号做退出前清理*/
 	{
 		fprintf(stdout, "signal error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
 		exit(-1);
 	}
 
-	Startup_LogServer(&LogMqServer);
+	Startup_LogServer(&LogMqServer);/*启动日志服务*/
 
-	Startup_LoadSever(&LoadCtrl);
+	Startup_LoadSever(&LoadCtrl);/*启动负载控制*/
 
-	server_sock = Startup(&port);
+	server_sock = Startup(&port);/*启动Socket侦听*/
 
-	Startup_ConnectMgrServr(&connect_mgr,server_sock);
+	Startup_ConnectMgrServr(&ConnectMgr,server_sock);/*启动长连接管理服务*/
 	
-	WriteLogtoFile(&LogMqServer,0,"INF httpd running on port %d\n", port);
+	ThreadPool_Init(&ThreadPoolObj);/*启动线程池管理*/
+	
+	WriteLogtoFile(&LogMqServer,0,"INF httpd running on port %d\n", port);/*启动成功*/
 
 	for(;;)
 	{
-		UpdateSelect(&connect_mgr);
-		switch(select((connect_mgr.Maxfdp)+1,&(connect_mgr.Readfds),NULL,NULL,&(connect_mgr.Timeout)))
+		UpdateSelect(&ConnectMgr);
+		switch(select((ConnectMgr.Maxfdp)+1,&(ConnectMgr.Readfds),NULL,NULL,&(ConnectMgr.Timeout)))
 		{ 
 			case -1: 
 				raise(SIGINT);
 				break;
 			case 0:
-				TimeOutDeal(&connect_mgr);
+				TimeOutDeal(&ConnectMgr);
 				break;
 			default: 
-				CheckSelect(&connect_mgr);
+				CheckSelect(&ConnectMgr);
 		}
 	}
 	WriteLogtoFile(&LogMqServer,1,"INF httpd server stop!\n");
