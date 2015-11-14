@@ -183,12 +183,12 @@ typedef struct
 
 ST_THREAD_POOL ThreadPoolObj={	.Mutex=PTHREAD_MUTEX_INITIALIZER, \
 								.MaxThread_Num=30, \
-								.MinThread_Num=5, \
+								.MinThread_Num=2, \
 								.CurThread_Num=0, \
 								.CurJob_Num=0, \
 								.CurLoadState=0, \
 								.JobQueue={.MqDir="/ThreadPoolMq"}, \
-								.CountVar={.Count=PTHREAD_COND_INITIALIZER,.CountMutex=PTHREAD_MUTEX_INITIALIZER,.CountTimeOut={.tv_sec=(time_t)20,.tv_nsec=0L}},
+								.CountVar={.Count=PTHREAD_COND_INITIALIZER,.CountMutex=PTHREAD_MUTEX_INITIALIZER,.CountTimeOut={.tv_sec=(time_t)0,.tv_nsec=0L}},
 								};
 
 extern int errno;
@@ -1454,8 +1454,8 @@ int ThreadPool_Init(ST_THREAD_POOL *pool)
 		exit(-1);
 	}
 	
-	pthread_attr_init(&(pool->Pthread.Attr));
-	pthread_attr_setdetachstate(&(pool->Pthread.Attr), PTHREAD_CREATE_JOINABLE);
+	pthread_attr_init(&(pool->Pthread.Attr));			
+	pthread_attr_setdetachstate(&(pool->Pthread.Attr), PTHREAD_CREATE_DETACHED);
 	pthread_mutex_lock(&(pool->Mutex)); //lock
 	if (pthread_create(&(pool->Pthread.Pid), &(pool->Pthread.Attr), ThreadPool, (void *)pool) != 0)
 	{
@@ -1507,6 +1507,7 @@ void *ThreadPool(void *arg)
 				Deal_Request((void *)buf);/*处理连接请求*/
 			}
 			pthread_mutex_lock(&(pool->Mutex)); /*lock*/
+			printf("mq num :%ld\n",pool->JobQueue.MqAttr.mq_curmsgs);
 			if(pool->JobQueue.MqAttr.mq_curmsgs>pool->CurThread_Num)	/*如果当前任务较重则考虑增加线程*/
 			{
 				if(pool->CurThread_Num < pool->MaxThread_Num)/*当前线程数没有超过最大限制*/
@@ -1516,6 +1517,7 @@ void *ThreadPool(void *arg)
 						WriteLogtoFile(&LogMqServer,errno,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 					}else
 					{
+						printf("pthread_create\n");
 						pool->CurThread_Num++;
 					}
 				}
@@ -1525,14 +1527,23 @@ void *ThreadPool(void *arg)
 		{
 			/*当前任务较轻则考虑删除线程*/
 			pthread_mutex_lock(&(pool->CountVar.CountMutex));/*锁住互斥量*/
+			//printf("Wait**********************\n");
+			pool->CountVar.CountTimeOut.tv_sec=time(NULL)+10;
 			ret=pthread_cond_timedwait(&(pool->CountVar.Count),&(pool->CountVar.CountMutex),&(pool->CountVar.CountTimeOut));
-			if(ret==ETIME)
+			printf("%d\n",ret);
+			if(ret!=0)
 			{
+				//printf("kaolv shanchu\n");
 				pthread_mutex_unlock(&(pool->CountVar.CountMutex));/*解锁互斥量*/
 				pthread_mutex_lock(&(pool->Mutex)); /*lock*/
+				printf("thread  num :%d\n",pool->CurThread_Num);
 				if(pool->CurThread_Num > pool->MinThread_Num)
 				{
-					return 0;
+					printf("shanchu\n");
+					pool->CurThread_Num--;
+					pthread_mutex_unlock(&(pool->Mutex)); /*unlock*/
+					pthread_mutex_unlock(&(pool->CountVar.CountMutex));/*解锁互斥量*/
+					pthread_exit(NULL);
 				}
 				pthread_mutex_unlock(&(pool->Mutex)); /*unlock*/
 			}
