@@ -814,6 +814,7 @@ int Send_ResponseBodyToClient(int client,const char *path)
 		if(send(client, buf, n, MSG_NOSIGNAL)==-1)
 		{
 			WriteLogtoFile(&LogMqServer,errno,"SYS send Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+			close(fd);
 			return -1;
 		}
 	}
@@ -1115,11 +1116,14 @@ int ConnectionGet(LOAD_TYPE *load)
 
 	return 0;
 }
+long mq_flags;		long mq_maxmsg; 	 long mq_msgsize;	   long mq_curmsgs;
 
 int Startup_LogServer(LOG_SERVER *LogServerID)
 {
 	int ret=0;
-	if((LogServerID->LogMqd = mq_open(LogServerID->MqDir,O_CREAT |O_RDWR,0666,NULL))==(mqd_t)-1)
+	LogServerID->MqAttr.mq_msgsize=500;
+	LogServerID->MqAttr.mq_maxmsg=1024;
+	if((LogServerID->LogMqd = mq_open(LogServerID->MqDir,O_CREAT |O_RDWR,0666,&(LogServerID->MqAttr)))==(mqd_t)-1)
 	{
 		fprintf(stdout, RED"mq_open error File:%s:%d %s\n"NONE, __FILE__, __LINE__,strerror(errno));
 		exit(-1);
@@ -1222,7 +1226,7 @@ int WriteLogtoFile(LOG_SERVER *LogServerID,int err,const char *fmt,...)
 
 	if(mq_send(LogServerID->LogMqd,(char *)buf,strlen(buf)+1,prio)<0)
 	{
-		fprintf(stdout, RED"mq_open error File:%s:%d %s\n"NONE, __FILE__, __LINE__,strerror(errno));
+		fprintf(stdout, RED"mq_send error File:%s:%d %s\n"NONE, __FILE__, __LINE__,strerror(errno));
 	}
 	va_end(ap);
 	return 0;
@@ -1444,7 +1448,9 @@ int TimeOutDeal(ST_CONNECT_MGR *pt_connect)
 int ThreadPool_Init(ST_THREAD_POOL *pool)
 {
 	int ret=0;
-	if((pool->JobQueue.MqId= mq_open(pool->JobQueue.MqDir,O_CREAT |O_RDWR,0666,NULL))==(mqd_t)-1)
+	pool->JobQueue.MqAttr.mq_msgsize=20;
+	pool->JobQueue.MqAttr.mq_maxmsg=1024;
+	if((pool->JobQueue.MqId= mq_open(pool->JobQueue.MqDir,O_CREAT |O_RDWR,0666,&(pool->JobQueue.MqAttr)))==(mqd_t)-1)
 	{
 		fprintf(stdout, RED"mq_open error File:%s:%d %s\n"NONE, __FILE__, __LINE__,strerror(errno));
 		exit(-1);
@@ -1481,7 +1487,9 @@ int ThreadPool_Init(ST_THREAD_POOL *pool)
 
 void *ThreadPool(void *arg)
 {
-	int ret;
+	int ret=0;
+	int n=0;
+	int i=0;
 	unsigned  prio;
 	ST_THREAD_POOL *pool=(ST_THREAD_POOL *)arg;
 	char buf[sizeof(int)*3];
@@ -1504,8 +1512,16 @@ void *ThreadPool(void *arg)
 		if(ret==-1)
 		{
 			WriteLogtoFile(&LogMqServer,errno,"SYS mq_getattr Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
-		}else if(pool->JobQueue.MqAttr.mq_curmsgs>0)/*获取成功并且有新任务则取出执行*/
+		}else if((n=pool->JobQueue.MqAttr.mq_curmsgs)>0)/*获取成功并且有新任务则取出执行*/
 		{
+			for(i=0;i<n-1;i++)
+			{
+				pthread_mutex_lock(&(pool->CountVar.CountMutex));/*锁住互斥量*/
+
+				pthread_cond_signal(&(pool->CountVar.Count));/*条件改变，发送信号，唤醒线程池中的一个线程*/
+
+				pthread_mutex_unlock(&(pool->CountVar.CountMutex));/*解锁互斥量*/
+			}
 			if((ret=mq_receive(pool->JobQueue.MqId,buf,pool->JobQueue.MqAttr.mq_msgsize,&prio))!=sizeof(int))
 			{
 				WriteLogtoFile(&LogMqServer,errno,"SYS mq_receive Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
@@ -1513,6 +1529,11 @@ void *ThreadPool(void *arg)
 			}else
 			{
 				Deal_Request((void *)buf);/*处理连接请求*/
+			}
+			ret=mq_getattr(pool->JobQueue.MqId,&(pool->JobQueue.MqAttr));/*获取当前任务队列任务数*/
+			if(ret==-1)
+			{
+				WriteLogtoFile(&LogMqServer,errno,"SYS mq_getattr Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 			}
 			pthread_mutex_lock(&(pool->Mutex)); /*lock*/
 			fprintf(stdout,YELLOW"mq num :%ld\n"NONE,pool->JobQueue.MqAttr.mq_curmsgs);
@@ -1534,8 +1555,11 @@ void *ThreadPool(void *arg)
 		}else if(pool->JobQueue.MqAttr.mq_curmsgs==0)
 		{
 			/*当前任务较轻则考虑删除线程*/
+			pthread_mutex_lock(&(pool->Mutex)); /*lock*/
 			pthread_mutex_lock(&(pool->CountVar.CountMutex));/*锁住互斥量*/
-			pool->CountVar.CountTimeOut.tv_sec=time(NULL)+10;
+			n=pool->CurThread_Num - pool->MinThread_Num;
+			pool->CountVar.CountTimeOut.tv_sec=time(NULL)+10*(6-((n>5)?5:n));
+			pthread_mutex_unlock(&(pool->Mutex)); /*unlock*/
 			ret=pthread_cond_timedwait(&(pool->CountVar.Count),&(pool->CountVar.CountMutex),&(pool->CountVar.CountTimeOut));
 			if(ret!=0)
 			{
