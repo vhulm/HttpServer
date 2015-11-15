@@ -869,7 +869,7 @@ int Get_Line(int sock, char *buf, int size)
 		}
 		if(n==-1)
 		{
-			printf("Clinet close! Get_Line\n");
+			fprintf(stdout,"\033[1;31;40mClinet socket close!\033[0m\n");
 			return -1;
 		}
 	}
@@ -1075,7 +1075,7 @@ int Get_ConnectionNum(LOAD_TYPE *load)
 		WriteLogtoFile(&LogMqServer,errno,"SYS semctl error! file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 		raise(SIGINT);
 	}
-	printf("Load %d\n",(load->MaxContion)-val);
+	fprintf(stdout,"\033[1;33;40mLoad %d\033[0m\n",(load->MaxContion)-val);
 	return ((load->MaxContion)-val);
 }
 
@@ -1085,7 +1085,6 @@ int ConnectionDel(LOAD_TYPE *load)
 	load->Opt.sem_num=0;
 	load->Opt.sem_op=1;
 	load->Opt.sem_flg=0;
-	printf("del\n");
 	Get_ConnectionNum(load);
 	ret=semop(load->SemID,&(load->Opt),1);
 	if(ret==-1)
@@ -1102,7 +1101,6 @@ int ConnectionGet(LOAD_TYPE *load)
 	load->Opt.sem_num=0;
 	load->Opt.sem_op=-1;
 	load->Opt.sem_flg=0;
-	printf("get\n");
 	Get_ConnectionNum(load);
 	ret=semop(load->SemID,&(load->Opt),1);
 	if(ret==-1)
@@ -1119,13 +1117,13 @@ int Startup_LogServer(LOG_SERVER *LogServerID)
 	int ret=0;
 	if((LogServerID->LogMqd = mq_open(LogServerID->MqDir,O_CREAT |O_RDWR,0666,NULL))==(mqd_t)-1)
 	{
-		fprintf(stdout, "mq_open error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		fprintf(stdout, "\033[1;31;40mmq_open error File:%s:%d %s\033[0m\n", __FILE__, __LINE__,strerror(errno));
 		exit(-1);
 	}
 	ret=mq_getattr(LogServerID->LogMqd,&(LogServerID->MqAttr));
 	if(ret==-1)
 	{
-		fprintf(stdout, "mq_getattr error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		fprintf(stdout, "\033[1;31;40mmq_getattr error File:%s:%d %s\033[0m\n", __FILE__, __LINE__,strerror(errno));
 		mq_unlink(LogServerID->MqDir);
 		exit(-1);
 	}
@@ -1145,7 +1143,7 @@ int Register_logThread(LOG_SERVER *LogServerID)
 {
 	if(mq_notify(LogServerID->LogMqd,&(LogServerID->SigEnv)) == -1)
 	{
-		fprintf(stdout, "mq_notify error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		fprintf(stdout, "\033[1;31;40mmq_notify error File:%s:%d %s\033[0m\n", __FILE__, __LINE__,strerror(errno));
 		return -1;
 	}
 	return 0;
@@ -1159,14 +1157,14 @@ void Log_ServerThread(union sigval LogServerID)
 	int n=0;
 	if(Register_logThread(((LOG_SERVER *)(LogServerID.sival_ptr)))==-1)
 	{
-		fprintf(stdout, "Register_logThread error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		fprintf(stdout, "\033[1;31;40mRegister_logThread error File:%s:%d %s\033[0m\n", __FILE__, __LINE__,strerror(errno));
 		raise(SIGINT);
 	}
 	//相关处理
 	fd=open(((LOG_SERVER *)(LogServerID.sival_ptr))->LogFileDir ,O_WRONLY|O_APPEND|O_CREAT,755);
 	if(fd==-1)
 	{
-		fprintf(stdout, "mq_receive error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		fprintf(stdout, "\033[1;31;40mmq_receive error File:%s:%d %s\033[0m\n", __FILE__, __LINE__,strerror(errno));
 		raise(SIGINT);
 	}
 
@@ -1174,13 +1172,19 @@ void Log_ServerThread(union sigval LogServerID)
 	{
 		if((n=mq_receive(((LOG_SERVER *)(LogServerID.sival_ptr))->LogMqd,buf,((LOG_SERVER *)(LogServerID.sival_ptr))->MqAttr.mq_msgsize,&prio))==(mqd_t)-1)
 		{
-			fprintf(stdout, "mq_receive error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+			fprintf(stdout, "\033[1;31;40mmq_receive error File:%s:%d %s\033[0m\n", __FILE__, __LINE__,strerror(errno));
 			raise(SIGINT);
 		}
 
 		write(fd,buf,strlen(buf));
 		#ifdef DEBUG
-			fprintf(stdout,"%s",buf);
+			if(memcmp(buf+32,"SYS",3)==0)//如果是系统函数调用 错误以红色打印
+			{
+				fprintf(stdout,"\033[1;31;40m%s\033[0m",buf);
+			}else
+			{
+				fprintf(stdout,"%s",buf);
+			}
 			fflush(stdout);
 		#endif
 	}while(n>=0);
@@ -1207,14 +1211,14 @@ int WriteLogtoFile(LOG_SERVER *LogServerID,int err,const char *fmt,...)
 	timer=time(NULL);
 	ptime=localtime(&timer);                //转换为本地时间
 
-    sprintf(buf,"%d-%02d-%02d %02d:%02d:%02d INFOR_ID[%03d]:",(1900+ptime->tm_year),ptime->tm_mon+1,ptime->tm_mday,ptime->tm_hour,ptime->tm_min,ptime->tm_sec,err);
+    sprintf(buf,"%d-%02d-%02d %02d:%02d:%02d LOG_ID[%03d]:",(1900+ptime->tm_year),ptime->tm_mon+1,ptime->tm_mday,ptime->tm_hour,ptime->tm_min,ptime->tm_sec,err);
 
 	vsnprintf(buf+strlen(buf),(MAXBUFSIZE-strlen(buf)-1),fmt,ap);
 	strcat(buf,"\0");
 
 	if(mq_send(LogServerID->LogMqd,(char *)buf,strlen(buf)+1,prio)<0)
 	{
-		fprintf(stdout, "mq_open error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		fprintf(stdout, "\033[1;31;40mmq_open error File:%s:%d %s\033[0m\n", __FILE__, __LINE__,strerror(errno));
 	}
 	va_end(ap);
 	return 0;
@@ -1227,7 +1231,7 @@ void QuitSignal(int sig)
 		mq_unlink(LogMqServer.MqDir);
 		semctl(LoadCtrl.SemID,0,IPC_RMID,0);
 		pthread_cond_destroy(&(ThreadPoolObj.CountVar.Count));
-		printf("HttpServer Service to stop\n");
+		fprintf(stdout,"HttpServer Service to stop\n");
 		exit(-1);
 	}
 }
@@ -1347,7 +1351,7 @@ int CheckSelect(ST_CONNECT_MGR *pt_connect)
 	if(FD_ISSET(pt_cli->fd,&(pt_connect->Readfds)))
 	{	
 		client_sock = accept(pt_cli->fd,(struct sockaddr *)&client_name,&client_name_len);
-		printf("accept**********************************************************\n");
+		fprintf(stdout,"\033[1;33;40maccept\033[0m\n");
 		if (client_sock == -1)
 		{
 			WriteLogtoFile(&LogMqServer,errno,"SYS accept_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
@@ -1385,7 +1389,7 @@ int CheckSelect(ST_CONNECT_MGR *pt_connect)
 				if(mq_send(ThreadPoolObj.JobQueue.MqId,(char *)&(pt_cli->fd),sizeof(int),prio)<0)/*发送Socket fd到任务队列*/
 				{
 					ConnectionDel(pt_connect->pt_LoadCtrl);
-					fprintf(stdout, "mq_open error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+					WriteLogtoFile(&LogMqServer,errno,"SYS mq_send Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 				}
 				pthread_mutex_lock(&(ThreadPoolObj.CountVar.CountMutex));/*锁住互斥量*/
 
@@ -1398,7 +1402,7 @@ int CheckSelect(ST_CONNECT_MGR *pt_connect)
 				pt_cli->WaitTime=20;
 			}else if((CurTime-(pt_cli->LastMtime))>(pt_cli->WaitTime))
 			{
-				printf("time out\n");
+				fprintf(stdout,"\033[1;33;40mclient time out\033[0m\n");
 				pt_cli->ConnectState=-2;
 				close(pt_cli->fd);
 				ConnectionDel(pt_connect->pt_LoadCtrl);
@@ -1422,7 +1426,7 @@ int TimeOutDeal(ST_CONNECT_MGR *pt_connect)
 		pt_cli=((pt_connect->pt_CilenMgr)+i);
 		if(((pt_cli->ConnectState)==1)&&((CurTime-(pt_cli->LastMtime))>(pt_cli->WaitTime)))
 		{
-			printf("time out\n");
+			fprintf(stdout,"\033[1;33;40mclient time out\033[0m\n");
 			pt_cli->ConnectState=-2;
 			close(pt_cli->fd);
 			ConnectionDel(pt_connect->pt_LoadCtrl);
@@ -1437,20 +1441,20 @@ int ThreadPool_Init(ST_THREAD_POOL *pool)
 	int ret=0;
 	if((pool->JobQueue.MqId= mq_open(pool->JobQueue.MqDir,O_CREAT |O_RDWR,0666,NULL))==(mqd_t)-1)
 	{
-		fprintf(stdout, "mq_open error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		fprintf(stdout, "\033[1;31;40mmq_open error File:%s:%d %s\033[0m\n", __FILE__, __LINE__,strerror(errno));
 		exit(-1);
 	}
 	ret=mq_getattr(pool->JobQueue.MqId,&(pool->JobQueue.MqAttr));
 	if(ret==-1)
 	{
-		fprintf(stdout, "mq_getattr error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		fprintf(stdout, "\033[1;31;40mmq_getattr error File:%s:%d %s\033[0m\n", __FILE__, __LINE__,strerror(errno));
 		mq_unlink(pool->JobQueue.MqDir);
 		exit(-1);
 	}
 	ret=pthread_cond_init(&(pool->CountVar.Count),NULL);
 	if(ret!=0)
 	{
-		fprintf(stdout, "pthread_cond_init error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		fprintf(stdout, "\033[1;31;40mpthread_cond_init error File:%s:%d %s\033[0m\n", __FILE__, __LINE__,strerror(errno));
 		exit(-1);
 	}
 	
@@ -1459,7 +1463,7 @@ int ThreadPool_Init(ST_THREAD_POOL *pool)
 	pthread_mutex_lock(&(pool->Mutex)); //lock
 	if (pthread_create(&(pool->Pthread.Pid), &(pool->Pthread.Attr), ThreadPool, (void *)pool) != 0)
 	{
-		WriteLogtoFile(&LogMqServer,errno,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
+		fprintf(stdout, "\033[1;31;40mpthread_create error File:%s:%d %s\033[0m\n", __FILE__, __LINE__,strerror(errno));
 		raise(SIGINT);
 	}else
 	{
@@ -1494,20 +1498,19 @@ void *ThreadPool(void *arg)
 		ret=mq_getattr(pool->JobQueue.MqId,&(pool->JobQueue.MqAttr));/*获取当前任务队列任务数*/
 		if(ret==-1)
 		{
-			fprintf(stdout, "mq_getattr error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
-			//exit(-1);	/*------------------------------------------------*/
+			WriteLogtoFile(&LogMqServer,errno,"SYS mq_getattr Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 		}else if(pool->JobQueue.MqAttr.mq_curmsgs>0)/*获取成功并且有新任务则取出执行*/
 		{
 			if((ret=mq_receive(pool->JobQueue.MqId,buf,pool->JobQueue.MqAttr.mq_msgsize,&prio))!=sizeof(int))
 			{
-				fprintf(stdout, "mq_receive error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+				WriteLogtoFile(&LogMqServer,errno,"SYS mq_receive Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 				raise(SIGINT);
 			}else
 			{
 				Deal_Request((void *)buf);/*处理连接请求*/
 			}
 			pthread_mutex_lock(&(pool->Mutex)); /*lock*/
-			printf("mq num :%ld\n",pool->JobQueue.MqAttr.mq_curmsgs);
+			fprintf(stdout,"\033[1;33;40mmq num :%ld\033[0m\n",pool->JobQueue.MqAttr.mq_curmsgs);
 			if(pool->JobQueue.MqAttr.mq_curmsgs>pool->CurThread_Num)	/*如果当前任务较重则考虑增加线程*/
 			{
 				if(pool->CurThread_Num < pool->MaxThread_Num)/*当前线程数没有超过最大限制*/
@@ -1517,7 +1520,7 @@ void *ThreadPool(void *arg)
 						WriteLogtoFile(&LogMqServer,errno,"SYS pthread_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 					}else
 					{
-						printf("pthread_create\n");
+						fprintf(stdout,"\033[1;33;40mpthread_create\033[0m\n");
 						pool->CurThread_Num++;
 					}
 				}
@@ -1527,19 +1530,16 @@ void *ThreadPool(void *arg)
 		{
 			/*当前任务较轻则考虑删除线程*/
 			pthread_mutex_lock(&(pool->CountVar.CountMutex));/*锁住互斥量*/
-			//printf("Wait**********************\n");
 			pool->CountVar.CountTimeOut.tv_sec=time(NULL)+10;
 			ret=pthread_cond_timedwait(&(pool->CountVar.Count),&(pool->CountVar.CountMutex),&(pool->CountVar.CountTimeOut));
-			printf("%d\n",ret);
 			if(ret!=0)
 			{
-				//printf("kaolv shanchu\n");
 				pthread_mutex_unlock(&(pool->CountVar.CountMutex));/*解锁互斥量*/
 				pthread_mutex_lock(&(pool->Mutex)); /*lock*/
-				printf("thread  num :%d\n",pool->CurThread_Num);
+				fprintf(stdout,"\033[1;33;40mthread  num :%d\033[0m\n",pool->CurThread_Num);
 				if(pool->CurThread_Num > pool->MinThread_Num)
 				{
-					printf("shanchu\n");
+					fprintf(stdout,"\033[1;33;40mshanchu\033[0m\n");
 					pool->CurThread_Num--;
 					pthread_mutex_unlock(&(pool->Mutex)); /*unlock*/
 					pthread_mutex_unlock(&(pool->CountVar.CountMutex));/*解锁互斥量*/
@@ -1590,7 +1590,7 @@ int main(int argc,char *argv[])
 	#endif
 	if(signal(SIGINT,QuitSignal)==SIG_ERR)/*注册SIGINT 信号做退出前清理*/
 	{
-		fprintf(stdout, "signal error File:%s:%d %s\n", __FILE__, __LINE__,strerror(errno));
+		fprintf(stdout, "\033[1;31;40msignal error File:%s:%d %s\033[0m\n", __FILE__, __LINE__,strerror(errno));
 		exit(-1);
 	}
 
@@ -1604,8 +1604,7 @@ int main(int argc,char *argv[])
 	
 	ThreadPool_Init(&ThreadPoolObj);/*启动线程池管理*/
 	
-	WriteLogtoFile(&LogMqServer,0,"INF httpd running on port %d\n", port);/*启动成功*/
-
+	WriteLogtoFile(&LogMqServer,0,"SYS httpd running on port %d\n", port);/*启动成功*/
 	for(;;)
 	{
 		UpdateSelect(&ConnectMgr);
