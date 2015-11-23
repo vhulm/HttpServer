@@ -217,7 +217,7 @@ int Send_ResponseHeadToClient(int client,const char *headName,const char *value)
 int Send_ResponseBlankLineToClient(int client);
 int Send_ResponseBodyToClient(int client,const char *path);
 
-int Get_Line(int, char *, int);
+int Get_Line(int, char *, int size);
 
 int IPMatch(const char *ClientIP);
 int Get_ImageFileType(RESPONSE_MSG *request);
@@ -314,7 +314,7 @@ void *Deal_Request(void *psocket)
 	memset(&msg_client,0,sizeof(msg_client));
 	if(LoadControl(client,&msg_client,&LoadCtrl)!=0)
 	{
-		QuryDelSelect(&ConnectMgr,client);
+		printf("\n%d\n",QuryDelSelect(&ConnectMgr,client));
 		return (NULL);
 	}
 
@@ -340,7 +340,7 @@ void *Deal_Request(void *psocket)
 		return (NULL);
 	}
 	WriteLogtoFile(&LogMqServer,9,"Method:%s URL:%s Path:%s QueryStr:%s\n",msg_client.Method,msg_client.URL,msg_client.Path,msg_client.QueryStr);
-	msg_client.KeepLive=20;
+	msg_client.KeepLive=10;
 	ChangeClientSta(&ConnectMgr,client,2,msg_client.KeepLive);
 
 	return ((void*)(NULL));
@@ -348,9 +348,14 @@ void *Deal_Request(void *psocket)
 
 int LoadControl(int client,RESPONSE_MSG *request,LOAD_TYPE *load)
 {
+	char c;
 	request->ClientSocket=client;
 	if(Get_ConnectionNum(load)>ALLOW_MAX_CONNECTION)
 	{
+		if(recv(request->ClientSocket, &c, 1, MSG_PEEK)==0)
+		{
+			return -1;
+		}
 		request->ErrorCode=-1;
 		request->StaticMsg.StatusCode=503;//The file is not found
 		ResponseError(request); 
@@ -660,7 +665,7 @@ int Execute_CGI(RESPONSE_MSG *request)
 		{
 			for (i = 0; i < request->Content_Length; i++)
 			{
-				if(recv(request->ClientSocket, &c, 1, 0)==-1)
+				if(recv(request->ClientSocket, &c, 1, 0)<=0)
 				{
 					return -1;
 				}
@@ -849,13 +854,13 @@ int Get_Line(int sock, char *buf, int size)
 			if (c == '\r')
 			{
 				n = recv(sock, &c, 1, MSG_PEEK);
-				if(n==-1)
+				if(n<=0)
 				{
 					return -1;
 				}
 				if ((n > 0) && (c == '\n'))
 				{
-					if(recv(sock, &c, 1, 0)==-1)
+					if(recv(sock, &c, 1, 0)<=0)
 					{
 						return -1;
 					}
@@ -871,10 +876,7 @@ int Get_Line(int sock, char *buf, int size)
 		else
 		{
 			c = '\n';
-		}
-		if(n==-1)
-		{
-			fprintf(stdout,RED"Clinet socket close!\n"NONE);
+			fprintf(stdout,RED"read socket error!\n"NONE);
 			return -1;
 		}
 	}
@@ -1366,7 +1368,7 @@ int CheckSelect(ST_CONNECT_MGR *pt_connect)
 			WriteLogtoFile(&LogMqServer,errno,"SYS accept_create Eorror file:%s line:%d %s\n", __FILE__,__LINE__,strerror(errno));
 		}else
 		{
-			if(Get_ConnectionNum(&LoadCtrl)>ALLOW_MAX_CONNECTION+5)
+			if(Get_ConnectionNum(pt_connect->pt_LoadCtrl)>ALLOW_MAX_CONNECTION+5)
 			{
 				close(client_sock);
 			}else
